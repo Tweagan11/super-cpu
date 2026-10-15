@@ -5,11 +5,14 @@
 //! - SSB-3 first cut: reads both fighters' state every frame (`state.rs`)
 //!   from a hook on the fighter's per-frame update (`frame.rs`)
 //! - SSB-4 first cut: sends a state packet per frame plus heartbeats (`net.rs`)
+//! - SSB-3: velocity, shield, jumps, hitstun flag, stage id
+//! - SSB-10 (game version half): no state packets on a mismatched build
+//!   (`version.rs`)
 //!
 //! Still to do, in story order:
-//! - SSB-3: velocity, shield, jumps, hitstun, stage id
+//! - SSB-3: invincible flag (no precedented accessor yet, see docs/protocol.md)
 //! - SSB-6: apply inputs from the PC to the bot's port
-//! - SSB-10: refuse to log or play on a mismatched build (`version.rs`)
+//! - SSB-10: mod set hash
 
 mod config;
 mod frame;
@@ -28,6 +31,10 @@ pub fn main() {
         net::PROTO_VERSION,
         version::EXPECTED_GAME_VERSION
     );
+
+    // On a mismatch this only logs; state.rs checks the result every frame
+    // and the heartbeat carries the running version to the PC.
+    version::check();
 
     let cfg = config::load();
     println!("[super-cpu] config: pc {}:{}", cfg.pc_ip, cfg.udp_port);

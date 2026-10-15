@@ -12,6 +12,7 @@ import socket
 import time
 
 from .kinds import kind_name
+from .stages import stage_layout, stage_name
 from .statuses import status_name
 from .protocol import Fighter
 from .wire import KIND_HEARTBEAT, KIND_STATE, BadPacket, unpack_header, unpack_heartbeat, unpack_state
@@ -67,11 +68,18 @@ class FrameTracker:
 def describe(port: int, f: Fighter) -> str:
     where = "air" if f.airborne else "ground"
     stocks = "?" if f.stocks < 0 else str(f.stocks)
+    marks = ("HITSTUN " if f.in_hitstun else "") + ("INVINC " if f.invincible else "")
     return (
         f"P{port} {kind_name(f.fighter_kind):<10} {f.damage:6.1f}%  "
-        f"({f.pos_x:7.1f}, {f.pos_y:7.1f})  {stocks} stk  {where:<6} "
-        f"{status_name(f.status_kind)}"
+        f"({f.pos_x:7.1f}, {f.pos_y:7.1f}) v({f.vel_x:+5.2f}, {f.vel_y:+5.2f})  "
+        f"{stocks} stk  sh {f.shield_hp:4.1f}  j{f.jumps_left}  {where:<6} "
+        f"{marks}{status_name(f.status_kind)}"
     )
+
+
+def stage_line(stage_id: int) -> str:
+    layout = stage_layout(stage_id)
+    return f"[listen] stage {stage_name(stage_id)} (id {stage_id}, layout {layout or 'other'})"
 
 
 def winner_line(final) -> str:
@@ -134,13 +142,17 @@ def listen(port: int, expect_version: str | None, report_every: float = 5.0) -> 
                 last_uptime = hb.uptime_ms
                 health = hb
                 if expect_version and hb.game_version != expect_version:
-                    print(f"[listen] WARNING: plugin built for {hb.game_version}, expected {expect_version}")
+                    print(
+                        f"[listen] WARNING: Switch is running game {hb.game_version or '?'}, "
+                        f"expected {expect_version}. The plugin sends no state on a mismatch."
+                    )
             elif header.kind == KIND_STATE:
                 _, latest = unpack_state(buf)
                 if frames.see(latest.frame):
                     if final is not None:
                         print(winner_line(final))
                     print("[listen] match started")
+                    print(stage_line(latest.stage_id))
                 final = latest
                 last_state_at = time.monotonic()
 

@@ -1,9 +1,14 @@
 //! Per-frame fighter state (SSB-3). Field order and types must match
 //! `bridge/bridge/protocol.py` and `docs/protocol.md`.
 //!
-//! First cut: fighter kind, position, damage, stocks, status, motion,
-//! animation frame, facing and airborne are live. Velocity, shield, jumps
-//! and the other flags are sent as 0 until they're wired up.
+//! Live: fighter kind, position, velocity, damage, shield, stocks, status,
+//! motion, animation frame, facing, jumps left, airborne and hitstun flags,
+//! and the stage id. The invincible flag is still sent as 0: the Training
+//! Modpack never reads hit status, so there's no precedented accessor for it
+//! yet (see docs/protocol.md).
+//!
+//! Every game call here follows something the Training Modpack does; the
+//! comment on each one says where.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
@@ -34,6 +39,11 @@ pub struct FighterState {
 }
 
 pub const FLAG_AIRBORNE: u32 = 1;
+pub const FLAG_HITSTUN: u32 = 1 << 1;
+/// Reserved, never set yet (no precedented accessor). Kept so the bit is
+/// documented in one place.
+#[allow(dead_code)]
+pub const FLAG_INVINCIBLE: u32 = 1 << 2;
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct FrameState {
@@ -48,6 +58,9 @@ struct Collector {
     current: FrameState,
     last_entry: i32,
     last_seen: Option<Instant>,
+    /// Costume slot printed once per entry per match (SSB-8 asks which slot
+    /// is green R.O.B.). Log only, not in any packet.
+    color_logged: [bool; 2],
 }
 
 static COLLECTOR: Mutex<Collector> = Mutex::new(Collector {
@@ -58,6 +71,7 @@ static COLLECTOR: Mutex<Collector> = Mutex::new(Collector {
     }; 2] },
     last_entry: i32::MAX,
     last_seen: None,
+    color_logged: [false; 2],
 });
 
 static SENDER: OnceLock<SyncSender<FrameState>> = OnceLock::new();
@@ -86,6 +100,11 @@ pub fn init(sender: SyncSender<FrameState>) {
 /// Fighters run in entry order within a frame, so when the entry id stops
 /// going up, the previous frame is complete: publish it and start a new one.
 pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
+    // SSB-10: wrong game build means no state at all, and we don't even
+    // read game memory. Heartbeats keep going from net.rs.
+    if !crate::version::game_version_ok() {
+        return;
+    }
     unsafe {
         if (acc.battle_object_id >> 28) as i32 != *BATTLE_OBJECT_CATEGORY_FIGHTER {
             return;
@@ -112,6 +131,7 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
             println!("[super-cpu] match started");
             c.current = FrameState::default();
             c.last_entry = i32::MAX;
+            c.color_logged = [false; 2];
         } else if entry <= c.last_entry {
             // wrapped around: the last frame is done
             if let Some(tx) = SENDER.get() {
@@ -125,6 +145,25 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
         c.last_seen = Some(now);
         c.last_entry = entry;
         c.current.fighters[entry as usize] = fighter;
+        // Same global the modpack reads mid-match (save_states.rs, tech.rs).
+        // The stage can't change during a match, but reading it every
+        // frame is one cheap call and avoids caring about match start order.
+        c.current.stage_id = app::sv_information::stage_id();
+
+        if !c.color_logged[entry as usize] {
+            c.color_logged[entry as usize] = true;
+            // FIGHTER_INSTANCE_WORK_ID_INT_COLOR has no modpack precedent,
+            // so it only goes to the log. Read the same way as ENTRY_ID
+            // above (WorkModule::get_int on an instance work id).
+            let color = WorkModule::get_int(acc, *FIGHTER_INSTANCE_WORK_ID_INT_COLOR);
+            println!(
+                "[super-cpu] P{} fighter_kind {} color {} (stage_id {})",
+                entry + 1,
+                fighter.fighter_kind,
+                color,
+                c.current.stage_id
+            );
+        }
     }
 }
 
@@ -133,19 +172,58 @@ unsafe fn read_fighter(acc: &mut BattleObjectModuleAccessor, entry: i32) -> Figh
     if StatusModule::situation_kind(acc) == *SITUATION_KIND_AIR {
         flags |= FLAG_AIRBORNE;
     }
+    let status_kind = StatusModule::status_kind(acc);
+    if is_hitstun_status(status_kind) {
+        flags |= FLAG_HITSTUN;
+    }
+
+    // Velocity: KineticModule::get_sum_speed_x/_y, as in the modpack's
+    // fast_fall.rs (is_falling). The modpack passes the value 1 there
+    // (spelled FIGHTER_KINETIC_ENERGY_ID_GRAVITY); 1 is also
+    // KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN, which is what the skyline-smash
+    // docs for get_sum_speed_x/_y use for "current velocity". Same value,
+    // clearer name.
+    let vel_x = KineticModule::get_sum_speed_x(acc, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);
+    let vel_y = KineticModule::get_sum_speed_y(acc, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);
+
+    // Shield and jumps are instance work variables, read with the same
+    // WorkModule::get_float/get_int calls the modpack uses for its work
+    // reads (common/mod.rs and save_states.rs for ENTRY_ID, charge.rs and
+    // debug.rs::print_fighter_info for floats and other ints). The ids
+    // themselves come from skyline-smash lua_const.rs.
+    let shield_hp = WorkModule::get_float(acc, *FIGHTER_INSTANCE_WORK_ID_FLOAT_GUARD_SHIELD);
+    let jump_max = WorkModule::get_int(acc, *FIGHTER_INSTANCE_WORK_ID_INT_JUMP_COUNT_MAX);
+    let jumps_used = WorkModule::get_int(acc, *FIGHTER_INSTANCE_WORK_ID_INT_JUMP_COUNT);
+
     FighterState {
         fighter_kind: utility::get_kind(acc),
         pos_x: PostureModule::pos_x(acc),
         pos_y: PostureModule::pos_y(acc),
+        vel_x,
+        vel_y,
         damage: DamageModule::damage(acc, 0),
+        shield_hp,
         stocks: stock_count(entry),
-        status_kind: StatusModule::status_kind(acc),
+        status_kind,
         motion_kind: MotionModule::motion_kind(acc),
         anim_frame: MotionModule::frame(acc),
         facing: if PostureModule::lr(acc) < 0.0 { -1 } else { 1 },
+        jumps_left: jumps_left(jump_max, jumps_used),
         flags,
-        ..FighterState::default()
     }
+}
+
+/// Jumps remaining, never negative (the count can briefly read past the max
+/// on some characters and states).
+pub fn jumps_left(max: i32, used: i32) -> i32 {
+    (max - used).max(0)
+}
+
+/// Copied from the modpack's `is_in_hitstun` (src/common/mod.rs): any status
+/// from DAMAGE up to, but not including, DAMAGE_FALL. Tumble (DAMAGE_FALL)
+/// is left out on purpose, same as the modpack.
+pub fn is_hitstun_status(status_kind: i32) -> bool {
+    (*FIGHTER_STATUS_KIND_DAMAGE..*FIGHTER_STATUS_KIND_DAMAGE_FALL).contains(&status_kind)
 }
 
 unsafe fn stock_count(entry: i32) -> i32 {

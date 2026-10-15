@@ -45,6 +45,11 @@ class Fighter:
     def in_hitstun(self) -> bool:
         return bool(self.flags & 2)
 
+    @property
+    def invincible(self) -> bool:
+        """Always False for now: the plugin doesn't set bit 2 yet."""
+        return bool(self.flags & 4)
+
 
 @dataclass(frozen=True)
 class Frame:
