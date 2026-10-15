@@ -1,0 +1,20 @@
+# Rust
+plugin/target/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Data and models (large, keep out of git)
+data/
+runs/
+checkpoints/
+*.parquet
+*.pt
+*.onnx
+
+# OS
+.DS_Store
+Thumbs.db
