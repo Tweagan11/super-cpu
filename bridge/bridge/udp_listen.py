@@ -15,6 +15,7 @@ import time
 
 from .kinds import kind_name
 from .matches import FrameTracker, MatchEnded, MatchStarted, MatchWatcher  # noqa: F401 (FrameTracker re-exported)
+from .stages import stage_layout, stage_name
 from .statuses import status_name
 from .protocol import Fighter, Frame
 from .wire import BadPacket, Heartbeat
@@ -50,11 +51,18 @@ class SeqTracker:
 def describe(port: int, f: Fighter) -> str:
     where = "air" if f.airborne else "ground"
     stocks = "?" if f.stocks < 0 else str(f.stocks)
+    marks = ("HITSTUN " if f.in_hitstun else "") + ("INVINC " if f.invincible else "")
     return (
         f"P{port} {kind_name(f.fighter_kind):<10} {f.damage:6.1f}%  "
-        f"({f.pos_x:7.1f}, {f.pos_y:7.1f})  {stocks} stk  {where:<6} "
-        f"{status_name(f.status_kind)}"
+        f"({f.pos_x:7.1f}, {f.pos_y:7.1f}) v({f.vel_x:+5.2f}, {f.vel_y:+5.2f})  "
+        f"{stocks} stk  sh {f.shield_hp:4.1f}  j{f.jumps_left}  {where:<6} "
+        f"{marks}{status_name(f.status_kind)}"
     )
+
+
+def stage_line(stage_id: int) -> str:
+    layout = stage_layout(stage_id)
+    return f"[listen] stage {stage_name(stage_id)} (id {stage_id}, layout {layout or 'other'})"
 
 
 def winner_line(final) -> str:
@@ -76,6 +84,7 @@ class ListenPrinter:
 
     def on_match_start(self, ev: MatchStarted) -> None:
         print("[listen] match started")
+        print(stage_line(ev.first.stage_id))
 
     def on_match_end(self, ev: MatchEnded) -> None:
         print(winner_line(ev.final))
@@ -134,7 +143,10 @@ def listen(
                 last_uptime = hb.uptime_ms
                 health = hb
                 if expect_version and hb.game_version != expect_version:
-                    print(f"[listen] WARNING: plugin built for {hb.game_version}, expected {expect_version}")
+                    print(
+                        f"[listen] WARNING: Switch is running game {hb.game_version or '?'}, "
+                        f"expected {expect_version}. The plugin sends no state on a mismatch."
+                    )
             elif isinstance(msg, Frame):
                 latest = msg
 
@@ -172,7 +184,7 @@ def main() -> None:
     ap.add_argument("--expect-version", default="13.0.4")
     ap.add_argument("--log", nargs="?", const="", default=None, metavar="DIR",
                     help="write each match through MatchLogger (default dir data/matches)")
-    ap.add_argument("--stage", default="fd", help="stage layout until stage_id is streamed: battlefield, fd, omega")
+    ap.add_argument("--stage", default="fd", help="fallback layout when the stage id is not Battlefield or FD/Omega: battlefield, fd, omega")
     ap.add_argument("--mod-hash", default="unset")
     ap.add_argument("--p1", default="unknown", help="who's on port 1: a name, bot:<model>, or cpu:9")
     ap.add_argument("--p2", default="unknown", help="who's on port 2")

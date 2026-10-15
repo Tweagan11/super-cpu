@@ -71,6 +71,6 @@ Phase 1 tools (from `bridge/`):
 | `python -m bridge.eval --games 50 --model scripted` | scores N matches into `eval/results.csv` (see `eval/README.md`) |
 | `python -m bridge.fake_switch --matches 3` | fake Switch that plays 3 short matches with a winner each |
 
-The scripted R.O.B. baseline (SSB-11) is `bridge/bridge/scripted.py`, selectable as `--policy scripted`. Set `SCPU_STAGE=battlefield|fd|omega` and `SCPU_BOT_PORT=1|2` for it until stage_id and port mapping are streamed.
+The scripted R.O.B. baseline (SSB-11) is `bridge/bridge/scripted.py`, selectable as `--policy scripted`. It picks the stage layout from the streamed stage id. `SCPU_STAGE=battlefield|fd|omega` is only a fallback for other stages; set `SCPU_BOT_PORT=1|2` until port mapping is streamed.
 
 Pin the game version and mod set in `plugin/src/version.rs` before collecting any data.

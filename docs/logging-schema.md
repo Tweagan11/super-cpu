@@ -38,9 +38,9 @@ The `.npz` holds three arrays: `header` (the JSON as a 0-d string), `frames`, an
 | `started_at`, `ended_at` | ISO 8601, UTC, PC clock |
 | `game_version` | from the plugin heartbeat, e.g. `13.0.4` |
 | `mod_hash` | from `--mod-hash`. `unset` until SSB-10 freezes the mod list |
-| `stage_id` | from the state stream. 0 means "not sent yet" |
+| `stage_id` | from the state stream (`app::sv_information::stage_id()`). 0 is Battlefield. -1 means unknown |
 | `stage_layout` | `battlefield` or `fd` (Omega forms count as `fd`) |
-| `stage_source` | `flag` (from `--stage`) or `stage_id` (once the plugin sends it) |
+| `stage_source` | `stage_id` when the id maps to Battlefield or FD/Omega, else `flag` (from `--stage`) |
 | `ruleset` | `{"stocks": 3, "items": false, "time_limit_min": null}` for v1 |
 | `ports` | list of 2, see below |
 | `inputs_present` | false until inputs are captured; then the input columns are real |

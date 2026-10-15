@@ -22,7 +22,7 @@ python -m bridge.eval --games 50 --model scripted --opponent cpu9 --bot-port 2 -
 | `--opponent` | cpu9 | |
 | `--bot-port` | 2 | which port is the bot (1 or 2) |
 | `--platform` | switch | `switch` or `emulator` |
-| `--stage` | fd | `battlefield`, `fd` or `omega` (Omega counts as `fd`). Needed until the plugin streams stage_id |
+| `--stage` | fd | fallback layout for stages that aren't Battlefield or FD/Omega. The real layout comes from the streamed stage id |
 | `--expect-version` | 13.0.4 | matches from another game version don't count |
 | `--mod-hash` | unset | |
 | `--min-seconds` | 10 | shorter matches don't count (someone backing out of a match) |
@@ -58,6 +58,6 @@ Phase 1's gate is a 50-game eval that runs unattended. Today it runs with **a hu
 2. **One process for play and eval.** Wire `EvalSession.observers()` into `bridge.run`'s watcher (see above), or add a state fan-out so both can listen.
 3. **Results screen to next match.** Needs menu automation, which doesn't exist. The plugin stops sending state on the results screen, so the PC can't see where it is. Options: (a) plugin-side, press A on the results screen and pick "rematch"/ready on character select through the same input-injection hook, ideally driven by a new "menu" packet from the PC; (b) use a ruleset/mode that loops by itself (for example a Training Modpack style auto-restart, or a custom mode that resets stocks instead of ending the match). Either way the plugin has to report the scene (results / CSS / stage select / in match) so the PC knows what to press.
 4. **Character select state.** On rematch the CPU level, costume, and port assignment have to stay the same. The plugin should send both fighter kinds and CPU level in a handshake so the harness can refuse a wrong setup instead of logging it.
-5. **Stage selection.** Same problem for alternating Battlefield and FD. Until stage_id is streamed, one stage per run with `--stage`.
+5. **Stage selection.** Same problem for alternating Battlefield and FD. Stage id is streamed now, so mixed-stage runs score correctly; picking the stage still needs menu automation.
 6. **Recovery from hangs.** A watchdog on the PC side: if no state arrives for, say, 60 s outside the results screen, alert and stop. `--idle-timeout` covers the "Switch went away" case today; it can't tell "stuck in a menu" from "between games" until the plugin reports the scene.
 7. **Game version and mod hash from the plugin.** The version check uses the heartbeat already. The mod hash is `--mod-hash` until SSB-10 has the plugin report it.

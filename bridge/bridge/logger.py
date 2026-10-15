@@ -31,7 +31,7 @@ from .matches import (
     fighters,
 )
 from .protocol import Fighter, Frame, Inputs
-from .stages import layout_name
+from .stages import layout_name, stage_layout
 
 SCHEMA_VERSION = 1
 N_PORTS = 2
@@ -119,7 +119,7 @@ class MatchLogger:
     """Collects frames for the current match and writes them on match end.
 
     `controllers` names who's on each port: a human name, `bot:<model>`, or
-    `cpu:9`. `stage` is the layout name used until stage_id is streamed.
+    `cpu:9`. `stage` is the fallback layout for stage ids that aren't Battlefield or FD/Omega.
     """
 
     def __init__(
@@ -225,7 +225,7 @@ class MatchLogger:
             "mod_hash": self.mod_hash,
             "stage_id": stage_id,
             "stage_layout": layout_name(stage_id, self.stage),
-            "stage_source": "stage_id" if stage_id else "flag",
+            "stage_source": "stage_id" if stage_layout(stage_id) else "flag",
             "ruleset": self.ruleset,
             "ports": [
                 {

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from bridge.stages import STAGE_ID_UNKNOWN
 from bridge.protocol import Fighter, Frame
 from bridge.statuses import STATUS_NAMES
 
@@ -20,7 +21,7 @@ def fighter(**kw) -> Fighter:
     return Fighter(**base)
 
 
-def frame(n: int = 0, bot: Fighter | None = None, opp: Fighter | None = None, stage_id: int = 0) -> Frame:
+def frame(n: int = 0, bot: Fighter | None = None, opp: Fighter | None = None, stage_id: int = STAGE_ID_UNKNOWN) -> Frame:
     return Frame(n, stage_id, bot or fighter(), opp or fighter(pos_x=50.0, facing=-1))
 
 

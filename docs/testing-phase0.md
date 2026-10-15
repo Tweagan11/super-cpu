@@ -79,6 +79,46 @@ Checks:
 
 The fake Switch now plays a fake match too: `python -m bridge.fake_switch` shows what the output should look like.
 
+## 7. Remaining fields and the version guard (SSB-3 / SSB-10)
+
+1. Rebuild, recopy, start `python -m bridge.udp_listen`.
+2. If you have `cargo skyline listen` running, the boot log should say `game version 13.0.4 matches, state streaming on`.
+3. Start a training mode match as R.O.B. vs R.O.B. on Battlefield.
+
+Each fighter line now looks like this:
+
+```
+P1 robot   12.0%  (  -30.1,   0.0) v(+0.00, +0.00)  3 stk  sh 50.0  j2  ground WAIT
+```
+
+`v(x, y)` is velocity per frame, `sh` is shield health, `j` is jumps left, and `HITSTUN` shows up before the status name while it's on.
+
+| Do this | Expect on the PC |
+| --- | --- |
+| Look at the line right after "match started" | `stage BattleField (id 0, layout battlefield)` |
+| Stand still | `v(+0.00, +0.00)` |
+| Run right, then left | vel x positive, then negative |
+| Jump | vel y positive going up, negative coming down |
+| Stand on the ground | `j2` (R.O.B. has one ground jump + one double jump) |
+| Jump once | `j1` |
+| Double jump | `j0`, back to `j2` after landing |
+| Hold shield a few seconds | `sh` goes down from 50; it climbs back after you let go |
+| Let the CPU hit you with something strong | `HITSTUN` while you're in the hurt animation (not during tumble, that's on purpose) |
+| Check the plugin log (`cargo skyline listen`) at match start | one line per fighter, like `P1 fighter_kind 45 color 3 (stage_id 0)`. **Tell me which color number green R.O.B. is.** |
+
+Stage ids, one match each (just check the stage line):
+
+| Stage | Expect |
+| --- | --- |
+| Battlefield | `BattleField (id 0, layout battlefield)` |
+| Final Destination | `End (id 3, layout fd)` |
+| Battlefield, Omega form | `End_BattleField (id 1, layout fd)` |
+| Any other Omega stage | `End_<something>`, `layout fd` |
+
+If any of those ids come out different, send me the line. Stage ids come straight from the game, but the name table is from the community bindings.
+
+Version guard (only if you want to see it trip): set `EXPECTED_GAME_VERSION` in `plugin/src/version.rs` to something wrong like `"13.0.3"`, rebuild, and start a match. Expect: heartbeats keep arriving, the listener's 5-second status line keeps going, no "match started" ever, and the boot log says `GAME VERSION MISMATCH`. Put it back to `"13.0.4"` afterwards. The listener's warning only fires when the *Switch* is on a different version than `--expect-version`, so you can also see it with `python -m bridge.udp_listen --expect-version 13.0.3`. You can try all of this without a Switch: `python -m bridge.fake_switch --version 13.0.3`.
+
 ## If nothing shows up
 
 | Symptom | Likely cause |
@@ -93,6 +133,9 @@ The fake Switch now plays a fake match too: `python -m bridge.fake_switch` shows
 | Fighter frames climbing, frames queued stays 0 | The hook runs but the state reader drops every frame. Send me the listener output |
 | Game crashes when a match starts | Remove the `.nro` and send me the crash report from `sd:/atmosphere/crash_reports/` |
 | Stocks show `?` | The FighterManager lookup failed; everything else still works |
+| Heartbeats arrive but never "match started", and the listener warns about the game version | The version guard tripped: the Switch isn't on 13.0.4. Expected behavior, no state is sent on the wrong build |
+| Heartbeat game version shows empty or garbage | The version read at boot failed. Send me the listener output |
+| Game crashes when a match starts on the new build only | One of the new reads (velocity, shield, jumps, stage) is bad. Send the crash report |
 
 ## Seeing plugin logs
 

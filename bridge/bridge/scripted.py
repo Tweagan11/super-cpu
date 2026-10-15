@@ -16,11 +16,10 @@ stocks, status, facing, airborne. vel, shield_hp and jumps_left come through
 as 0 for now. The bot only uses those once it has seen a nonzero value in its
 history, so it works the same with or without them.
 
-Stage geometry is the weak spot. stage_id isn't streamed yet, so the layout
-(Battlefield or FD/Omega) comes from config and the ledge/platform numbers in
-stages.py are estimates. The recovery and ledge rules need real stage data
-(measured ledges, or stage_id plus a table) before they're any good. Once
-stage_id arrives, `resolve_layout` picks the layout per frame automatically.
+Stage geometry is the weak spot. The layout (Battlefield or FD/Omega) comes
+from the streamed stage_id via `resolve_layout`, falling back to config for
+other stages. The ledge/platform numbers in stages.py are estimates, so the
+recovery and ledge rules need measured values before they're any good.
 
 Config, because `bridge.run --policy scripted` builds policies with no args:
 keyword args win, then env vars SCPU_STAGE (battlefield, fd, omega) and

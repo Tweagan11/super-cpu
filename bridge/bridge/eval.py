@@ -262,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--opponent", default="cpu9")
     ap.add_argument("--bot-port", type=int, default=2, choices=(1, 2))
     ap.add_argument("--platform", default="switch", choices=("switch", "emulator"))
-    ap.add_argument("--stage", default="fd", help="battlefield, fd or omega (until stage_id is streamed)")
+    ap.add_argument("--stage", default="fd", help="fallback layout when the stage id is not Battlefield or FD/Omega: battlefield, fd, omega")
     ap.add_argument("--mod-hash", default="unset")
     ap.add_argument("--expect-version", default="13.0.4")
     ap.add_argument("--min-seconds", type=float, default=10.0, help="ignore matches shorter than this")

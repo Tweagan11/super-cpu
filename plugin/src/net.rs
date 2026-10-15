@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::state::{FighterState, FrameState};
-use crate::version::EXPECTED_GAME_VERSION;
+use crate::version::running_game_version;
 
 pub const MAGIC: [u8; 4] = *b"SCPU";
 /// v2: heartbeat carries hook health (hook_installed, fighter_calls, frames_queued)
@@ -51,7 +51,9 @@ pub fn heartbeat_packet(seq: u32, uptime_ms: u64, h: Health) -> [u8; HEARTBEAT_L
     let mut buf = [0u8; HEARTBEAT_LEN];
     write_header(&mut buf, KIND_HEARTBEAT, seq);
     buf[12..20].copy_from_slice(&uptime_ms.to_le_bytes());
-    let v = EXPECTED_GAME_VERSION.as_bytes();
+    // The version the game is really running (SSB-10), so the PC's
+    // mismatch warning reports what's on the Switch, not what we expected.
+    let v = running_game_version().as_bytes();
     let n = v.len().min(8);
     buf[20..20 + n].copy_from_slice(&v[..n]);
     buf[28..32].copy_from_slice(&(h.hook_installed as u32).to_le_bytes());
