@@ -7,6 +7,8 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
+from .protocol import FRAME_SIZE, Frame, decode_frame, encode_frame
+
 MAGIC = b"SCPU"
 PROTO_VERSION = 1
 
@@ -58,6 +60,20 @@ def pack_heartbeat(seq: int, uptime_ms: int, game_version: str) -> bytes:
     return pack_header(KIND_HEARTBEAT, seq) + struct.pack(
         HEARTBEAT_FMT, uptime_ms, game_version.encode()[:8]
     )
+
+
+STATE_LEN = HEADER_LEN + FRAME_SIZE  # 148
+
+
+def pack_state(seq: int, frame: Frame) -> bytes:
+    return pack_header(KIND_STATE, seq) + encode_frame(frame)
+
+
+def unpack_state(buf: bytes) -> tuple[Header, Frame]:
+    h = unpack_header(buf)
+    if h.kind != KIND_STATE or len(buf) < STATE_LEN:
+        raise BadPacket("not a state packet")
+    return h, decode_frame(buf, HEADER_LEN)
 
 
 def unpack_heartbeat(buf: bytes) -> Heartbeat:

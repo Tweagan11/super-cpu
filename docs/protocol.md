@@ -25,9 +25,11 @@ Plugin to PC: UDP port 4243 by default (set in `sd:/ultimate/super-cpu/config.to
 
 28 bytes, sent every 500 ms.
 
-## State (kind 1, plugin to PC) - not built yet
+## State (kind 1, plugin to PC) - first cut built
 
-Header, then `frame` (u32), `stage_id` (i32), then two FighterState blocks (index 0 = bot, 1 = opponent). 148 bytes.
+Header, then `frame` (u32), `stage_id` (i32), then two FighterState blocks. 148 bytes, one per game frame during a match.
+
+For now index 0 is port 1 and index 1 is port 2; bot/opponent mapping comes with SSB-6. `frame` restarts at 0 each match. Live in the first cut: fighter_kind, pos, damage, stocks (-1 if unknown), status_kind, motion_kind, anim_frame, facing, airborne flag. Sent as 0 for now: vel, shield_hp, jumps_left, stage_id, hitstun and invincible flags.
 
 FighterState:
 

@@ -61,6 +61,24 @@ Your home network has to be set to Private for that rule to apply.
 
 Pass: heartbeats arrive, game version reads 13.0.4, the game plays normally.
 
+## 6. Fighter state (SSB-3 first cut)
+
+1. Rebuild the plugin and copy the new `.nro` over the old one.
+2. Start `python -m bridge.udp_listen`, then start a match. Training mode is easiest.
+3. The listener prints "match started", then both fighters once a second: name, damage, position, stocks, ground or air.
+
+Checks:
+
+| Do this | Expect on the PC |
+| --- | --- |
+| Hit the CPU a few times | Its damage matches the number on screen |
+| Jump | `air`, and pos_y goes up |
+| Walk left and right | pos_x goes down and up |
+| Lose a stock (or let the CPU fall off) | Stock count drops |
+| Watch the 5-second status line | Frames arriving at close to 60/s, skipped near 0 |
+
+The fake Switch now plays a fake match too: `python -m bridge.fake_switch` shows what the output should look like.
+
 ## If nothing shows up
 
 | Symptom | Likely cause |
@@ -69,6 +87,9 @@ Pass: heartbeats arrive, game version reads 13.0.4, the game plays normally.
 | No `config.toml` was created | Plugin didn't load. Check the `.nro` path and that Skyline/ARCropolis load at all |
 | Game crashes on boot | Remove the `.nro` and tell me the crash report from `sd:/atmosphere/crash_reports/` |
 | Missing rate above a few percent on Wi-Fi | Expected on busy Wi-Fi; try a USB Ethernet adapter in the dock |
+| Heartbeats arrive but no "match started" | The frame hook isn't running. If Training Modpack is installed, it patches the same slot; try removing it temporarily |
+| Game crashes when a match starts | The vtable offset in `plugin/src/frame.rs` is wrong for 13.0.4. Remove the `.nro` and send me the crash report |
+| Stocks show `?` | The FighterManager lookup failed; everything else still works |
 
 ## Seeing plugin logs
 

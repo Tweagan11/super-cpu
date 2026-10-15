@@ -1,15 +1,20 @@
 import unittest
 
-from bridge.udp_listen import SeqTracker
+from bridge.kinds import kind_name
+from bridge.protocol import Fighter, Frame
+from bridge.udp_listen import FrameTracker, SeqTracker
 from bridge.wire import (
     HEADER_LEN,
     HEARTBEAT_LEN,
     KIND_HEARTBEAT,
+    STATE_LEN,
     BadPacket,
     pack_header,
     pack_heartbeat,
+    pack_state,
     unpack_header,
     unpack_heartbeat,
+    unpack_state,
 )
 
 
@@ -43,6 +48,37 @@ class WireTests(unittest.TestCase):
             unpack_header(bad_ver)
         with self.assertRaises(BadPacket):
             unpack_header(b"SC")
+
+
+class StateTests(unittest.TestCase):
+    def _fighter(self, kind, dmg):
+        return Fighter(kind, 1.5, -2.0, 0.0, 0.0, dmg, 0.0, 3, 7, 0xABCDEF0123, 4.0, -1, 0, 1)
+
+    def test_size_matches_plugin(self):
+        # plugin/src/net.rs: STATE_LEN = 12 + 8 + 2 * 64
+        self.assertEqual(STATE_LEN, 148)
+
+    def test_state_round_trip(self):
+        f = Frame(1234, 0, self._fighter(0x2D, 42.5), self._fighter(0, 10.0))
+        header, back = unpack_state(pack_state(9, f))
+        self.assertEqual(header.seq, 9)
+        self.assertEqual(back, f)
+        self.assertTrue(back.bot.airborne)
+        self.assertEqual(kind_name(back.bot.fighter_kind), "robot")
+
+    def test_heartbeat_is_not_state(self):
+        with self.assertRaises(BadPacket):
+            unpack_state(pack_heartbeat(1, 1, "13.0.4"))
+
+
+class FrameTrackerTests(unittest.TestCase):
+    def test_skips_and_new_match(self):
+        t = FrameTracker()
+        self.assertTrue(t.see(0))
+        for f in [1, 2, 5]:
+            self.assertFalse(t.see(f))
+        self.assertEqual(t.skipped, 2)
+        self.assertTrue(t.see(0))
 
 
 class SeqTrackerTests(unittest.TestCase):

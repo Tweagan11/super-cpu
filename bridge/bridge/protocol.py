@@ -63,12 +63,23 @@ class Inputs:
     buttons: int = 0
 
 
-def decode_frame(buf: bytes) -> Frame:
-    frame, stage_id = struct.unpack_from(FRAME_HEADER_FMT, buf, 0)
-    off = struct.calcsize(FRAME_HEADER_FMT)
+def decode_frame(buf: bytes, offset: int = 0) -> Frame:
+    """Decode a frame body. For now `bot` is port 1 and `opponent` is port 2."""
+    frame, stage_id = struct.unpack_from(FRAME_HEADER_FMT, buf, offset)
+    off = offset + struct.calcsize(FRAME_HEADER_FMT)
     bot = Fighter(*struct.unpack_from(FIGHTER_FMT, buf, off))
     opp = Fighter(*struct.unpack_from(FIGHTER_FMT, buf, off + FIGHTER_SIZE))
     return Frame(frame, stage_id, bot, opp)
+
+
+def encode_frame(f: Frame) -> bytes:
+    def fighter(x: Fighter) -> bytes:
+        return struct.pack(
+            FIGHTER_FMT, x.fighter_kind, x.pos_x, x.pos_y, x.vel_x, x.vel_y, x.damage,
+            x.shield_hp, x.stocks, x.status_kind, x.motion_kind, x.anim_frame, x.facing,
+            x.jumps_left, x.flags,
+        )
+    return struct.pack(FRAME_HEADER_FMT, f.frame, f.stage_id) + fighter(f.bot) + fighter(f.opponent)
 
 
 def encode_inputs(inp: Inputs, frame: int) -> bytes:

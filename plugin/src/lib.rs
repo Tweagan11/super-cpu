@@ -1,20 +1,25 @@
 //! super-cpu Skyline plugin.
 //!
 //! Done so far:
-//! - SSB-1: loads alongside the mod set and logs on boot
-//! - first slice of SSB-4: heartbeat packets to the PC over UDP (see `net.rs`)
+//! - SSB-1: loads alongside the mod set, logs on boot and on match start
+//! - SSB-3 first cut: reads both fighters' state every frame (`state.rs`)
+//!   from a fighter vtable hook (`frame.rs`)
+//! - SSB-4 first cut: sends a state packet per frame plus heartbeats (`net.rs`)
 //!
 //! Still to do, in story order:
-//! - SSB-2: confirm hook points against the Training Modpack source
-//! - SSB-3: read both fighters' state every frame (see `state.rs`)
-//! - SSB-4: send a state packet per frame alongside the heartbeat
+//! - SSB-3: velocity, shield, jumps, hitstun, stage id
 //! - SSB-6: apply inputs from the PC to the bot's port
-//! - SSB-10: refuse to log or play on a mismatched build (see `version.rs`)
+//! - SSB-10: refuse to log or play on a mismatched build (`version.rs`)
 
 mod config;
+mod frame;
 mod net;
 mod state;
 mod version;
+
+/// Finished frames waiting for the network thread. If the network falls this
+/// far behind, new frames are dropped rather than slowing the game.
+const FRAME_QUEUE: usize = 8;
 
 #[skyline::main(name = "super_cpu")]
 pub fn main() {
@@ -27,6 +32,10 @@ pub fn main() {
     let cfg = config::load();
     println!("[super-cpu] config: pc {}:{}", cfg.pc_ip, cfg.udp_port);
 
+    let (tx, rx) = std::sync::mpsc::sync_channel(FRAME_QUEUE);
+    state::init(tx);
+    frame::install();
+
     // Networking never runs on the game thread.
-    std::thread::spawn(move || net::heartbeat_loop(cfg));
+    std::thread::spawn(move || net::run(cfg, rx));
 }
