@@ -62,4 +62,15 @@ python -m bridge.udp_listen
 
 To test the PC side without a Switch, run `python -m bridge.fake_switch` in a second terminal.
 
+Phase 1 tools (from `bridge/`):
+
+| Command | What it does |
+| --- | --- |
+| `python -m bridge.udp_listen --log --stage fd` | also writes each match to `data/matches/` (format in `docs/logging-schema.md`) |
+| `python -m bridge.inspect_log data/matches/*.npz` | summary of logged matches |
+| `python -m bridge.eval --games 50 --model scripted` | scores N matches into `eval/results.csv` (see `eval/README.md`) |
+| `python -m bridge.fake_switch --matches 3` | fake Switch that plays 3 short matches with a winner each |
+
+The scripted R.O.B. baseline (SSB-11) is `bridge/bridge/scripted.py`, selectable as `--policy scripted`. Set `SCPU_STAGE=battlefield|fd|omega` and `SCPU_BOT_PORT=1|2` for it until stage_id and port mapping are streamed.
+
 Pin the game version and mod set in `plugin/src/version.rs` before collecting any data.

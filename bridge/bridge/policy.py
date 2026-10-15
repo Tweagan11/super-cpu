@@ -4,7 +4,7 @@ state history in, inputs out.
 from __future__ import annotations
 
 from collections import deque
-from typing import Protocol, Sequence
+from typing import Callable, Protocol, Sequence
 
 from .protocol import Frame, Inputs
 
@@ -39,3 +39,18 @@ class History:
     def push(self, frame: Frame) -> Sequence[Frame]:
         self._frames.append(frame)
         return tuple(self._frames)
+
+
+def _scripted() -> Policy:
+    from .scripted import ScriptedRobPolicy  # lazy so policy.py stays import-light
+    return ScriptedRobPolicy()
+
+
+# Every selectable policy, by the name `--policy NAME` takes. Values are
+# zero-arg factories, so a policy reads its own config (see scripted.py).
+# Add new policies here and nowhere else.
+POLICIES: dict[str, Callable[[], Policy]] = {
+    "idle": IdlePolicy,
+    "walk": WalkTowardPolicy,
+    "scripted": _scripted,
+}
