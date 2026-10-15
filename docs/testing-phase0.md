@@ -119,6 +119,18 @@ If any of those ids come out different, send me the line. Stage ids come straigh
 
 Version guard (only if you want to see it trip): set `EXPECTED_GAME_VERSION` in `plugin/src/version.rs` to something wrong like `"13.0.3"`, rebuild, and start a match. Expect: heartbeats keep arriving, the listener's 5-second status line keeps going, no "match started" ever, and the boot log says `GAME VERSION MISMATCH`. Put it back to `"13.0.4"` afterwards. The listener's warning only fires when the *Switch* is on a different version than `--expect-version`, so you can also see it with `python -m bridge.udp_listen --expect-version 13.0.3`. You can try all of this without a Switch: `python -m bridge.fake_switch --version 13.0.3`.
 
+## 8. Measure the stages (for the scripted bot)
+
+The scripted bot's ledge and platform positions in `bridge/bridge/stages.py` are guesses. Measure the real ones once per stage:
+
+1. Run `python -m bridge.measure` instead of the listener (it shows the same output plus a measurement).
+2. Start a training match on Battlefield.
+3. Walk R.O.B. right up to the left edge until he teeters, then the right edge. Stand on each of the three platforms for a second, walking to both ends of each.
+4. Leave the match (or press Ctrl+C). It prints the main stage edges, ground height, platforms, and a `StageLayout(...)` block.
+5. Repeat on Final Destination (just the two edges).
+
+Send me both printouts and I'll put the numbers in `stages.py`.
+
 ## If nothing shows up
 
 | Symptom | Likely cause |
