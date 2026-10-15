@@ -2,7 +2,7 @@
 //! must never mix with the training set.
 
 /// Set this to the Ultimate version on your Switch before collecting data.
-pub const EXPECTED_GAME_VERSION: &str = "13.0.x";
+pub const EXPECTED_GAME_VERSION: &str = "13.0.4";
 
 /// Hash of the active mod set. Fill in once the mod list is frozen.
 pub const EXPECTED_MOD_HASH: &str = "unset";
