@@ -41,6 +41,7 @@ Or create the config file by hand before the first boot:
 ```
 pc_ip = "192.168.1.50"
 udp_port = 4243
+bot_port = 2
 ```
 
 ## 4. Allow the traffic on Windows
@@ -131,6 +132,75 @@ The scripted bot's ledge and platform positions in `bridge/bridge/stages.py` are
 
 Send me both printouts and I'll put the numbers in `stages.py`.
 
+## 9. Inputs: the PC moves the bot (SSB-5, SSB-6, SSB-7)
+
+Background on the hooks and the open questions these checks answer: `docs/hooks.md`.
+
+### 9a. PC side first, no Switch
+
+```
+python -m bridge.run --policy walk --delay 2 --bot-port 2
+python -m bridge.fake_switch
+```
+
+Expect "Switch found", "plugin: bot port 2 ... input hook installed, receiving yes", and a status line every 5 s with `applied` climbing, `late 0`, `rt med 2`. Then try the latency tool against a fake 20 ms network:
+
+```
+python -m bridge.latency --seconds 10
+python -m bridge.fake_switch --latency-ms 20
+```
+
+Round trip median should be about 3 to 4 frames.
+
+### 9b. Setup on the Switch
+
+1. Rebuild the plugin and copy the new `.nro` over.
+2. Add `bot_port = 2` to `config.toml` (a fresh template already has it). The bridge's `--bot-port` has to match; it warns if it doesn't.
+3. The bot's port needs a controller. Plug in a second controller or use a single Joy-Con, and pick the bot's character with it. A CPU slot won't work yet (see hooks.md for why and how we'll find out).
+4. Allow the replies through Windows Firewall: the rule from step 4 already covers inbound UDP 4243. Inputs go out from the PC, so nothing else is needed.
+5. Stop `udp_listen` first. Only one program can own port 4243.
+
+### 9c. Checks
+
+Start a versus match (not training mode) with you on port 1 and the bot's controller on port 2, then:
+
+```
+python -m bridge.run --policy walk --delay 2 --bot-port 2
+```
+
+| Do this | Expect |
+| --- | --- |
+| Start the bridge mid-match | Within a second the P2 fighter walks toward you and stops close by. Its own controller does nothing |
+| Walk around with your controller | P1 moves normally, no lag, no stuck inputs. The bot follows you |
+| Ctrl+C the bridge | Within 2 s the P2 controller works again |
+| Start it again | The bot takes over again |
+| Go to the menus with the bridge running | Menus work normally on both controllers (the plugin only drives during a match) |
+| Run a whole match without the bridge | Plays exactly like before this change |
+| Watch the status line | `late 0` or near it, `neutral` only rising when you stop the bridge, `rejected 0` |
+
+Write down what the bridge prints in its `hooks:` line (every 30 s): `input player_idx seen [...]` and `cpu controller_index seen [...]`.
+
+**Port or controller slot?** Quit to the character select, and this time pick P1's character with the controller that was the bot's and P2's with yours (so the controller order is the reverse of the port order). Start the bridge. If P2 still walks toward P1, `player_idx` is the port and you're done. If P1 walks instead, it's the controller slot: tell me, and for now set `fim_player_idx` in `config.toml` to the slot the bot's controller is in (0-based).
+
+**Can it drive a CPU?** Set up P1 human, P2 a CPU (any level), set `bot_port = 2`, start the bridge. If the CPU walks toward you, the final input mapping covers CPUs too and we can drop the extra controller. If it plays like a normal CPU, it doesn't. Either answer is useful; send the `hooks:` line.
+
+### 9d. Latency
+
+With a match running and the bot's controller on port 2:
+
+```
+python -m bridge.latency --seconds 60 --bot-port 2
+```
+
+Run it twice: Switch on Wi-Fi, then wired (USB Ethernet adapter in the dock). Write both results down here:
+
+| Network | Round trip median | p99 | max | late | lost |
+| --- | --- | --- | --- | --- | --- |
+| Wi-Fi | | | | | |
+| Wired | | | | | |
+
+The p99 round trip is the training delay (training/README.md: "train with input delay randomized from 0 to the worst case measured in SSB-7"), and it's the smallest `--delay` that won't drop inputs as late. Expect 2 frames at best (state for frame N leaves when N + 1 starts, so N + 1 is already gone), 3 to 4 on a good network.
+
 ## If nothing shows up
 
 | Symptom | Likely cause |
@@ -148,6 +218,14 @@ Send me both printouts and I'll put the numbers in `stages.py`.
 | Heartbeats arrive but never "match started", and the listener warns about the game version | The version guard tripped: the Switch isn't on 13.0.4. Expected behavior, no state is sent on the wrong build |
 | Heartbeat game version shows empty or garbage | The version read at boot failed. Send me the listener output |
 | Game crashes when a match starts on the new build only | One of the new reads (velocity, shield, jumps, stage) is bad. Send the crash report |
+| `bridge.run` says "input hook NOT installed" | The final input mapping pattern wasn't found (game version?). State still works. Send me the `cargo skyline listen` boot log |
+| "receiving NO" | The Switch socket couldn't be made non-blocking, so inputs are off to protect the state stream. Send me the boot log |
+| Inputs sent, status line `switch: rx 0 applied 0`, `rejected` climbing | Packets arrive but get refused. Usually the PC's IP isn't the `pc_ip` in config.toml (the plugin only takes input from that IP, e.g. a PC with two network adapters) |
+| Inputs sent, `rx` and `rejected` both stay 0 | Replies aren't reaching the Switch. Router or AP isolation dropping them, or a firewall on the PC blocking outbound UDP |
+| `late` climbing as fast as `applied` | The network is slower than `--delay`. Raise it, or run `bridge.latency` to pick one |
+| `applied` climbing but the bot doesn't move | Wrong port: check the "plugin drives port" warning, then the port-or-slot check in 9c |
+| The bot moves but so does P1 | `player_idx` is the controller slot, see 9c |
+| "plugin drives port X but --bot-port is Y" | Make `--bot-port` match `bot_port` in config.toml |
 
 ## Seeing plugin logs
 

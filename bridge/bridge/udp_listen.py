@@ -18,7 +18,7 @@ from .matches import FrameTracker, MatchEnded, MatchStarted, MatchWatcher  # noq
 from .stages import stage_layout, stage_name
 from .statuses import status_name
 from .protocol import Fighter, Frame
-from .wire import BadPacket, Heartbeat
+from .wire import KIND_CONTROL_STATUS, BadPacket, Heartbeat, bits_list, unpack_control_status
 
 
 class SeqTracker:
@@ -112,6 +112,7 @@ def listen(
     started = last_report = last_live = time.monotonic()
     latest = None
     health = None
+    control = None
     bad = 0
     bad_reasons: set[str] = set()
 
@@ -149,6 +150,11 @@ def listen(
                     )
             elif isinstance(msg, Frame):
                 latest = msg
+            elif header.kind == KIND_CONTROL_STATUS:
+                try:
+                    control = unpack_control_status(buf)
+                except BadPacket:
+                    bad += 1
 
         now = time.monotonic()
         # The plugin stops sending state on the results screen.
@@ -167,6 +173,15 @@ def listen(
                 print(
                     f"[listen] hook {hook}, fighter frames seen {health.fighter_calls}, "
                     f"frames queued {health.frames_queued}"
+                )
+            if control is not None:
+                o = control.orig
+                print(
+                    f"[listen] bot port {control.bot_port}, input hook "
+                    f"{'installed' if control.hook_installed else 'NOT installed'}, "
+                    f"PC session {'on' if control.session_active else 'off'}, "
+                    f"input player_idx seen {bits_list(control.idx_seen)}, "
+                    f"bot controller stick ({o.stick_x}, {o.stick_y}) buttons {o.buttons:#x}"
                 )
             if seqs.received:
                 print(
