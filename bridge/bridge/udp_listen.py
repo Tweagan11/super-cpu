@@ -14,7 +14,17 @@ import time
 from .kinds import kind_name
 from .statuses import status_name
 from .protocol import Fighter
-from .wire import KIND_HEARTBEAT, KIND_STATE, BadPacket, unpack_header, unpack_heartbeat, unpack_state
+from .wire import (
+    KIND_CONTROL_STATUS,
+    KIND_HEARTBEAT,
+    KIND_STATE,
+    BadPacket,
+    bits_list,
+    unpack_control_status,
+    unpack_header,
+    unpack_heartbeat,
+    unpack_state,
+)
 
 
 class SeqTracker:
@@ -103,6 +113,7 @@ def listen(port: int, expect_version: str | None, report_every: float = 5.0) -> 
     final = None  # last frame of the current match
     last_state_at = 0.0
     health = None
+    control = None
     bad = 0
     bad_reasons: set[str] = set()
 
@@ -135,6 +146,11 @@ def listen(port: int, expect_version: str | None, report_every: float = 5.0) -> 
                 health = hb
                 if expect_version and hb.game_version != expect_version:
                     print(f"[listen] WARNING: plugin built for {hb.game_version}, expected {expect_version}")
+            elif header.kind == KIND_CONTROL_STATUS:
+                try:
+                    control = unpack_control_status(buf)
+                except BadPacket:
+                    bad += 1
             elif header.kind == KIND_STATE:
                 _, latest = unpack_state(buf)
                 if frames.see(latest.frame):
@@ -164,6 +180,15 @@ def listen(port: int, expect_version: str | None, report_every: float = 5.0) -> 
                 print(
                     f"[listen] hook {hook}, fighter frames seen {health.fighter_calls}, "
                     f"frames queued {health.frames_queued}"
+                )
+            if control is not None:
+                o = control.orig
+                print(
+                    f"[listen] bot port {control.bot_port}, input hook "
+                    f"{'installed' if control.hook_installed else 'NOT installed'}, "
+                    f"PC session {'on' if control.session_active else 'off'}, "
+                    f"input player_idx seen {bits_list(control.idx_seen)}, "
+                    f"bot controller stick ({o.stick_x}, {o.stick_y}) buttons {o.buttons:#x}"
                 )
             if seqs.received:
                 print(

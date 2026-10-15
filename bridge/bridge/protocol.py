@@ -15,9 +15,7 @@ FRAME_HEADER_FMT = "<Ii"
 FIGHTER_SIZE = struct.calcsize(FIGHTER_FMT)
 FRAME_SIZE = struct.calcsize(FRAME_HEADER_FMT) + 2 * FIGHTER_SIZE
 
-# stick_x, stick_y, cstick_x, cstick_y (int8, -128..127), buttons (uint32 bitmask), frame (uint32)
-INPUT_FMT = "<4bII"
-INPUT_SIZE = struct.calcsize(INPUT_FMT)
+# The input packet layout lives in wire.py (pack_input), next to the header.
 
 
 @dataclass(frozen=True)
@@ -63,24 +61,22 @@ class Inputs:
     buttons: int = 0
 
 
-def decode_frame(buf: bytes, offset: int = 0) -> Frame:
-    """Decode a frame body. For now `bot` is port 1 and `opponent` is port 2."""
+def decode_frame(buf: bytes, offset: int = 0, bot_index: int = 0) -> Frame:
+    """Decode a frame body. The packet always has port 1 then port 2;
+    `bot_index` (bot port - 1, so 0 or 1) says which one is `bot`."""
     frame, stage_id = struct.unpack_from(FRAME_HEADER_FMT, buf, offset)
     off = offset + struct.calcsize(FRAME_HEADER_FMT)
-    bot = Fighter(*struct.unpack_from(FIGHTER_FMT, buf, off))
-    opp = Fighter(*struct.unpack_from(FIGHTER_FMT, buf, off + FIGHTER_SIZE))
-    return Frame(frame, stage_id, bot, opp)
+    p1 = Fighter(*struct.unpack_from(FIGHTER_FMT, buf, off))
+    p2 = Fighter(*struct.unpack_from(FIGHTER_FMT, buf, off + FIGHTER_SIZE))
+    return Frame(frame, stage_id, p2, p1) if bot_index == 1 else Frame(frame, stage_id, p1, p2)
 
 
-def encode_frame(f: Frame) -> bytes:
+def encode_frame(f: Frame, bot_index: int = 0) -> bytes:
     def fighter(x: Fighter) -> bytes:
         return struct.pack(
             FIGHTER_FMT, x.fighter_kind, x.pos_x, x.pos_y, x.vel_x, x.vel_y, x.damage,
             x.shield_hp, x.stocks, x.status_kind, x.motion_kind, x.anim_frame, x.facing,
             x.jumps_left, x.flags,
         )
-    return struct.pack(FRAME_HEADER_FMT, f.frame, f.stage_id) + fighter(f.bot) + fighter(f.opponent)
-
-
-def encode_inputs(inp: Inputs, frame: int) -> bytes:
-    return struct.pack(INPUT_FMT, inp.stick_x, inp.stick_y, inp.cstick_x, inp.cstick_y, inp.buttons, frame)
+    p1, p2 = (f.opponent, f.bot) if bot_index == 1 else (f.bot, f.opponent)
+    return struct.pack(FRAME_HEADER_FMT, f.frame, f.stage_id) + fighter(p1) + fighter(p2)

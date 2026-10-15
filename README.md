@@ -25,10 +25,10 @@ The emulator, when used, runs the same plugin and talks to the same bridge.
 | Path | What lives there |
 | --- | --- |
 | `plugin/` | Rust Skyline plugin: reads fighter state, applies inputs, version guard |
-| `bridge/` | Python TCP server, message protocol, policy interface |
+| `bridge/` | Python UDP bridge (`bridge.run`), passive viewer, latency tool, fake Switch, policy interface |
 | `training/` | Feature pipeline, action discretization, behavior cloning |
 | `eval/` | 50-game eval runner and results log |
-| `docs/` | Wire protocol, logging schema, and `testing-phase0.md` (start here to test on hardware) |
+| `docs/` | Wire protocol, game hook points (`hooks.md`), logging schema, and `testing-phase0.md` (start here to test on hardware) |
 
 ## Phases
 
@@ -57,9 +57,11 @@ Bridge (Python 3.11+):
 cd bridge
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
-python -m bridge.udp_listen
+python -m bridge.udp_listen                                  # just watch what the Switch sends
+python -m bridge.run --policy walk --delay 2 --bot-port 2    # drive the bot
+python -m bridge.latency --seconds 60 --bot-port 2           # measure round trip delay
 ```
 
-To test the PC side without a Switch, run `python -m bridge.fake_switch` in a second terminal.
+Only one of them can run at a time (they all own UDP 4243). `--bot-port` has to match `bot_port` in the plugin's config. To test the PC side without a Switch, run `python -m bridge.fake_switch` in a second terminal; it takes inputs and sends acks like the plugin.
 
 Pin the game version and mod set in `plugin/src/version.rs` before collecting any data.

@@ -81,6 +81,20 @@ pub fn init(sender: SyncSender<FrameState>) {
     }
 }
 
+/// SSB-6 helper: the frame number being collected right now, if a match is
+/// live (a fighter frame ran in the last 250 ms). Called from the input hook,
+/// which runs before the fighters update, so this is the last finished frame.
+/// Never blocks: None if the lock is busy.
+pub fn live_frame() -> Option<u32> {
+    let c = match COLLECTOR.try_lock() {
+        Ok(c) => c,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    let fresh = c.last_seen.map_or(false, |t| t.elapsed() < Duration::from_millis(250));
+    fresh.then_some(c.current.frame)
+}
+
 /// Called once per fighter per frame from the vtable hook in `frame.rs`.
 ///
 /// Fighters run in entry order within a frame, so when the entry id stops
