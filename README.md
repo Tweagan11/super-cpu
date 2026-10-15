@@ -28,7 +28,7 @@ The emulator, when used, runs the same plugin and talks to the same bridge.
 | `bridge/` | Python TCP server, message protocol, policy interface |
 | `training/` | Feature pipeline, action discretization, behavior cloning |
 | `eval/` | 50-game eval runner and results log |
-| `docs/` | Wire protocol and logging schema |
+| `docs/` | Wire protocol, logging schema, and `testing-phase0.md` (start here to test on hardware) |
 
 ## Phases
 
@@ -57,7 +57,9 @@ Bridge (Python 3.11+):
 cd bridge
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
-python -m bridge.server --port 4242
+python -m bridge.udp_listen
 ```
+
+To test the PC side without a Switch, run `python -m bridge.fake_switch` in a second terminal.
 
 Pin the game version and mod set in `plugin/src/version.rs` before collecting any data.
