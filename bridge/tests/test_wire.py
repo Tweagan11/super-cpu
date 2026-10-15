@@ -20,12 +20,14 @@ from bridge.wire import (
 
 class WireTests(unittest.TestCase):
     def test_sizes_match_plugin(self):
-        # plugin/src/net.rs: HEADER_LEN = 12, HEARTBEAT_LEN = 28
+        # plugin/src/net.rs: HEADER_LEN = 12, HEARTBEAT_LEN = 40
         self.assertEqual(HEADER_LEN, 12)
-        self.assertEqual(HEARTBEAT_LEN, 28)
+        self.assertEqual(HEARTBEAT_LEN, 40)
 
     def test_heartbeat_round_trip(self):
-        hb = unpack_heartbeat(pack_heartbeat(7, 1234, "13.0.4"))
+        hb = unpack_heartbeat(pack_heartbeat(7, 1234, "13.0.4", True, 500, 240))
+        self.assertTrue(hb.hook_installed)
+        self.assertEqual((hb.fighter_calls, hb.frames_queued), (500, 240))
         self.assertEqual(hb.header.kind, KIND_HEARTBEAT)
         self.assertEqual(hb.header.seq, 7)
         self.assertEqual(hb.uptime_ms, 1234)
@@ -34,11 +36,12 @@ class WireTests(unittest.TestCase):
     def test_matches_rust_byte_layout(self):
         # Built by hand the same way net.rs::heartbeat_packet does it.
         expected = (
-            b"SCPU" + (1).to_bytes(2, "little") + (3).to_bytes(2, "little")
+            b"SCPU" + (2).to_bytes(2, "little") + (3).to_bytes(2, "little")
             + (5).to_bytes(4, "little") + (900).to_bytes(8, "little")
-            + b"13.0.4\0\0"
+            + b"13.0.4\0\0" + (1).to_bytes(4, "little") + (77).to_bytes(4, "little")
+            + (30).to_bytes(4, "little")
         )
-        self.assertEqual(pack_heartbeat(5, 900, "13.0.4"), expected)
+        self.assertEqual(pack_heartbeat(5, 900, "13.0.4", True, 77, 30), expected)
 
     def test_rejects_bad_magic_and_version(self):
         with self.assertRaises(BadPacket):

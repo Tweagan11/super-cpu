@@ -3,7 +3,7 @@
 //! Done so far:
 //! - SSB-1: loads alongside the mod set, logs on boot and on match start
 //! - SSB-3 first cut: reads both fighters' state every frame (`state.rs`)
-//!   from a fighter vtable hook (`frame.rs`)
+//!   from a hook on the fighter's per-frame update (`frame.rs`)
 //! - SSB-4 first cut: sends a state packet per frame plus heartbeats (`net.rs`)
 //!
 //! Still to do, in story order:
@@ -37,5 +37,14 @@ pub fn main() {
     frame::install();
 
     // Networking never runs on the game thread.
-    std::thread::spawn(move || net::run(cfg, rx));
+    std::thread::spawn(move || net::run(cfg, rx, health));
+}
+
+fn health() -> net::Health {
+    use std::sync::atomic::Ordering::Relaxed;
+    net::Health {
+        hook_installed: frame::HOOK_INSTALLED.load(Relaxed),
+        fighter_calls: frame::FIGHTER_CALLS.load(Relaxed),
+        frames_queued: state::FRAMES_QUEUED.load(Relaxed),
+    }
 }

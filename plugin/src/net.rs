@@ -14,7 +14,8 @@ use crate::state::{FighterState, FrameState};
 use crate::version::EXPECTED_GAME_VERSION;
 
 pub const MAGIC: [u8; 4] = *b"SCPU";
-pub const PROTO_VERSION: u16 = 1;
+/// v2: heartbeat carries hook health (hook_installed, fighter_calls, frames_queued)
+pub const PROTO_VERSION: u16 = 2;
 
 pub const KIND_STATE: u16 = 1;
 pub const KIND_INPUT: u16 = 2;
@@ -22,7 +23,8 @@ pub const KIND_HEARTBEAT: u16 = 3;
 
 pub const HEADER_LEN: usize = 12;
 /// header + uptime_ms (u64) + game version (8 bytes, NUL padded)
-pub const HEARTBEAT_LEN: usize = HEADER_LEN + 8 + 8;
+/// + hook_installed (u32) + fighter_calls (u32) + frames_queued (u32)
+pub const HEARTBEAT_LEN: usize = HEADER_LEN + 8 + 8 + 12;
 pub const FIGHTER_LEN: usize = 64;
 /// header + frame (u32) + stage_id (i32) + 2 fighters
 pub const STATE_LEN: usize = HEADER_LEN + 8 + 2 * FIGHTER_LEN;
@@ -37,13 +39,24 @@ pub fn write_header(buf: &mut [u8], kind: u16, seq: u32) {
     buf[8..12].copy_from_slice(&seq.to_le_bytes());
 }
 
-pub fn heartbeat_packet(seq: u32, uptime_ms: u64) -> [u8; HEARTBEAT_LEN] {
+/// Hook health sent with every heartbeat.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Health {
+    pub hook_installed: bool,
+    pub fighter_calls: u32,
+    pub frames_queued: u32,
+}
+
+pub fn heartbeat_packet(seq: u32, uptime_ms: u64, h: Health) -> [u8; HEARTBEAT_LEN] {
     let mut buf = [0u8; HEARTBEAT_LEN];
     write_header(&mut buf, KIND_HEARTBEAT, seq);
     buf[12..20].copy_from_slice(&uptime_ms.to_le_bytes());
     let v = EXPECTED_GAME_VERSION.as_bytes();
     let n = v.len().min(8);
     buf[20..20 + n].copy_from_slice(&v[..n]);
+    buf[28..32].copy_from_slice(&(h.hook_installed as u32).to_le_bytes());
+    buf[32..36].copy_from_slice(&h.fighter_calls.to_le_bytes());
+    buf[36..40].copy_from_slice(&h.frames_queued.to_le_bytes());
     buf
 }
 
@@ -88,7 +101,8 @@ fn send(sock: &UdpSocket, packet: &[u8], target: &str) -> bool {
 
 /// Runs forever on its own thread: forwards each finished frame as a state
 /// packet and sends a heartbeat every 500 ms. Rebinds if the network drops.
-pub fn run(cfg: Config, frames: Receiver<FrameState>) {
+/// `health` is read fresh for each heartbeat.
+pub fn run(cfg: Config, frames: Receiver<FrameState>, health: fn() -> Health) {
     let target = format!("{}:{}", cfg.pc_ip, cfg.udp_port);
     let start = Instant::now();
     let mut seq: u32 = 0;
@@ -119,7 +133,7 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>) {
             if Instant::now() >= next_heartbeat {
                 next_heartbeat = Instant::now() + HEARTBEAT_EVERY;
                 let uptime_ms = start.elapsed().as_millis() as u64;
-                if !send(&sock, &heartbeat_packet(seq, uptime_ms), &target) {
+                if !send(&sock, &heartbeat_packet(seq, uptime_ms, health()), &target) {
                     break;
                 }
                 seq = seq.wrapping_add(1);

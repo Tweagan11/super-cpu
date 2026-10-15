@@ -9,7 +9,7 @@ Plugin to PC: UDP port 4243 by default (set in `sd:/ultimate/super-cpu/config.to
 | Field | Type | Notes |
 | --- | --- | --- |
 | magic | 4 bytes | `SCPU` |
-| proto_version | u16 | currently 1 |
+| proto_version | u16 | currently 2 |
 | kind | u16 | 1 = state, 2 = input, 3 = heartbeat |
 | seq | u32 | per sender, wraps at 2^32 |
 
@@ -22,8 +22,11 @@ Plugin to PC: UDP port 4243 by default (set in `sd:/ultimate/super-cpu/config.to
 | header | 12 bytes | |
 | uptime_ms | u64 | since the plugin loaded; going backwards means a restart |
 | game_version | 8 bytes | ASCII, NUL padded, e.g. `13.0.4` |
+| hook_installed | u32 | 1 once the fighter frame hook is in place |
+| fighter_calls | u32 | times the hook has run (any fighter, any mode) |
+| frames_queued | u32 | finished frames handed to the network thread |
 
-28 bytes, sent every 500 ms.
+40 bytes, sent every 500 ms. The last three fields (added in v2) tell you where the pipeline stops without needing plugin logs.
 
 ## State (kind 1, plugin to PC) - first cut built
 

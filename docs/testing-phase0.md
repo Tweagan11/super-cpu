@@ -87,8 +87,11 @@ The fake Switch now plays a fake match too: `python -m bridge.fake_switch` shows
 | No `config.toml` was created | Plugin didn't load. Check the `.nro` path and that Skyline/ARCropolis load at all |
 | Game crashes on boot | Remove the `.nro` and tell me the crash report from `sd:/atmosphere/crash_reports/` |
 | Missing rate above a few percent on Wi-Fi | Expected on busy Wi-Fi; try a USB Ethernet adapter in the dock |
-| Heartbeats arrive but no "match started" | The frame hook isn't running. If Training Modpack is installed, it patches the same slot; try removing it temporarily |
-| Game crashes when a match starts | The vtable offset in `plugin/src/frame.rs` is wrong for 13.0.4. Remove the `.nro` and send me the crash report |
+| Listener says "protocol v1, expected v2" | The Switch still has the old plugin. Rebuild and recopy the `.nro` |
+| "hook NOT installed" | The game's common module never triggered the hook install. Check that `libnro_hook.nro` is in the plugins folder |
+| Hook installed, fighter frames stays 0 during a match | The hooked function isn't running for fighters. Send me the listener output |
+| Fighter frames climbing, frames queued stays 0 | The hook runs but the state reader drops every frame. Send me the listener output |
+| Game crashes when a match starts | Remove the `.nro` and send me the crash report from `sd:/atmosphere/crash_reports/` |
 | Stocks show `?` | The FighterManager lookup failed; everything else still works |
 
 ## Seeing plugin logs

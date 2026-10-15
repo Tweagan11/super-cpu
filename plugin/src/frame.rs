@@ -1,51 +1,47 @@
 //! Once-per-fighter-per-frame hook (SSB-2/SSB-3).
 //!
-//! Same technique as the Training Modpack (`src/training/mod.rs`,
-//! `fighter_vtable_on_frame`): overwrite the fighter vtable's on-frame entry
-//! with our function. Unlike the modpack, we save whatever pointer was in the
-//! slot and call that first, so if another plugin patched it before us, its
-//! code still runs.
+//! Hooks `L2CFighterCommon::sys_line_system_control_fighter` by symbol name,
+//! which every fighter runs once per frame. It lives in the game's "common"
+//! module, so the hook is installed when that module loads (needs the
+//! nro_hook plugin, which ARCropolis setups already have). This is the same
+//! pattern the Training Modpack uses for its common-module hooks, and unlike
+//! patching a vtable address it doesn't break across game updates or fight
+//! with other plugins hooking the same function.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use skyline::hooks::{getRegionAddress, Region};
+use skyline::nro::{self, NroInfo};
+use smash::lib::L2CValue;
+use smash::lua2cpp::L2CFighterCommon;
 
-/// Offset (from .text) of the fighter vtable's on-frame slot.
-/// From Training Modpack `src/common/offsets.rs`. Verify on 13.0.4 (SSB-2).
-const FIGHTER_VTABLE_ON_FRAME_SLOT: usize = 0x4f80568;
+/// Reported in the heartbeat so the PC can see if the hook is alive.
+pub static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+pub static FIGHTER_CALLS: AtomicU32 = AtomicU32::new(0);
 
-static PREVIOUS: AtomicUsize = AtomicUsize::new(0);
-
-type OnFrame = unsafe extern "C" fn(&mut smash::app::Fighter);
-
-unsafe extern "C" fn on_frame(fighter: &mut smash::app::Fighter) {
-    let prev = PREVIOUS.load(Ordering::Relaxed);
-    if prev != 0 {
-        let prev: OnFrame = std::mem::transmute(prev);
-        prev(fighter);
-    }
-    let acc = fighter.battle_object.module_accessor;
+#[skyline::hook(replace = smash::lua2cpp::L2CFighterCommon_sys_line_system_control_fighter)]
+unsafe fn on_fighter_frame(fighter: &mut L2CFighterCommon) -> L2CValue {
+    let ret = original!()(fighter);
+    FIGHTER_CALLS.fetch_add(1, Ordering::Relaxed);
+    let acc = fighter.fighter_base.agent_base.agent.module_accessor;
     if !acc.is_null() {
         crate::state::on_fighter_frame(&mut *acc);
+    }
+    ret
+}
+
+fn nro_main(nro: &NroInfo<'_>) {
+    if nro.module.isLoaded {
+        return;
+    }
+    if nro.name == "common" {
+        skyline::install_hooks!(on_fighter_frame);
+        HOOK_INSTALLED.store(true, Ordering::Relaxed);
+        println!("[super-cpu] common module loaded, fighter frame hook installed");
     }
 }
 
 pub fn install() {
-    unsafe {
-        let text = getRegionAddress(Region::Text) as usize;
-        let slot = (text + FIGHTER_VTABLE_ON_FRAME_SLOT) as *const usize;
-        let prev = *slot;
-        PREVIOUS.store(prev, Ordering::Relaxed);
-        println!(
-            "[super-cpu] on-frame slot held text+{:#x}, installing hook",
-            prev.wrapping_sub(text)
-        );
-
-        if skyline::patching::Patch::in_text(FIGHTER_VTABLE_ON_FRAME_SLOT)
-            .data(on_frame as *const () as u64)
-            .is_err()
-        {
-            println!("[super-cpu] failed to patch the on-frame slot, no state will be sent");
-        }
+    if nro::add_hook(nro_main).is_err() {
+        println!("[super-cpu] nro_hook plugin missing, no state will be sent");
     }
 }

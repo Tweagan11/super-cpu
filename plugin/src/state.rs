@@ -61,6 +61,8 @@ static COLLECTOR: Mutex<Collector> = Mutex::new(Collector {
 });
 
 static SENDER: OnceLock<SyncSender<FrameState>> = OnceLock::new();
+/// Frames handed to the network thread, reported in the heartbeat.
+pub static FRAMES_QUEUED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static FIGHTER_MANAGER: AtomicUsize = AtomicUsize::new(0);
 
 /// A gap this long with no fighter frames means the next frame is a new match.
@@ -107,7 +109,10 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
         } else if entry <= c.last_entry {
             // wrapped around: the last frame is done
             if let Some(tx) = SENDER.get() {
-                let _ = tx.try_send(c.current); // never block the game
+                // never block the game; if the queue is full the frame is dropped
+                if tx.try_send(c.current).is_ok() {
+                    FRAMES_QUEUED.fetch_add(1, Ordering::Relaxed);
+                }
             }
             c.current.frame = c.current.frame.wrapping_add(1);
         }

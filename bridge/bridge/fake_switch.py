@@ -65,7 +65,7 @@ def run(host: str, port: int, drop: float, version: str, match: bool, seconds: f
             frame += 1
         if now >= next_hb:
             next_hb = now + 0.5
-            send(pack_heartbeat(seq, int((now - start) * 1000), version))
+            send(pack_heartbeat(seq, int((now - start) * 1000), version, True, 2 * frame, frame))
         time.sleep(FRAME_TIME if match else 0.5)
     print(f"[fake] done: sent {sent}, dropped {dropped}")
 

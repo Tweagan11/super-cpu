@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from .protocol import FRAME_SIZE, Frame, decode_frame, encode_frame
 
 MAGIC = b"SCPU"
-PROTO_VERSION = 1
+PROTO_VERSION = 2  # v2: heartbeat carries hook health
 
 KIND_STATE = 1
 KIND_INPUT = 2
@@ -19,8 +19,8 @@ KIND_HEARTBEAT = 3
 HEADER_FMT = "<4sHHI"  # magic, proto_version, kind, seq
 HEADER_LEN = struct.calcsize(HEADER_FMT)  # 12
 
-HEARTBEAT_FMT = "<Q8s"  # uptime_ms, game version (NUL padded)
-HEARTBEAT_LEN = HEADER_LEN + struct.calcsize(HEARTBEAT_FMT)  # 28
+HEARTBEAT_FMT = "<Q8sIII"  # uptime_ms, game version (NUL padded), hook_installed, fighter_calls, frames_queued
+HEARTBEAT_LEN = HEADER_LEN + struct.calcsize(HEARTBEAT_FMT)  # 40
 
 
 class BadPacket(ValueError):
@@ -39,6 +39,9 @@ class Heartbeat:
     header: Header
     uptime_ms: int
     game_version: str
+    hook_installed: bool = False
+    fighter_calls: int = 0
+    frames_queued: int = 0
 
 
 def pack_header(kind: int, seq: int) -> bytes:
@@ -56,9 +59,13 @@ def unpack_header(buf: bytes) -> Header:
     return Header(ver, kind, seq)
 
 
-def pack_heartbeat(seq: int, uptime_ms: int, game_version: str) -> bytes:
+def pack_heartbeat(
+    seq: int, uptime_ms: int, game_version: str,
+    hook_installed: bool = False, fighter_calls: int = 0, frames_queued: int = 0,
+) -> bytes:
     return pack_header(KIND_HEARTBEAT, seq) + struct.pack(
-        HEARTBEAT_FMT, uptime_ms, game_version.encode()[:8]
+        HEARTBEAT_FMT, uptime_ms, game_version.encode()[:8],
+        int(hook_installed), fighter_calls & 0xFFFFFFFF, frames_queued & 0xFFFFFFFF,
     )
 
 
@@ -80,5 +87,5 @@ def unpack_heartbeat(buf: bytes) -> Heartbeat:
     h = unpack_header(buf)
     if h.kind != KIND_HEARTBEAT or len(buf) < HEARTBEAT_LEN:
         raise BadPacket("not a heartbeat")
-    uptime_ms, ver = struct.unpack_from(HEARTBEAT_FMT, buf, HEADER_LEN)
-    return Heartbeat(h, uptime_ms, ver.rstrip(b"\0").decode(errors="replace"))
+    uptime_ms, ver, hooked, calls, queued = struct.unpack_from(HEARTBEAT_FMT, buf, HEADER_LEN)
+    return Heartbeat(h, uptime_ms, ver.rstrip(b"\0").decode(errors="replace"), bool(hooked), calls, queued)

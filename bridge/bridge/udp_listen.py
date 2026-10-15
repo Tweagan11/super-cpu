@@ -85,7 +85,9 @@ def listen(port: int, expect_version: str | None, report_every: float = 5.0) -> 
     last_uptime = 0
     last_report = last_live = time.monotonic()
     latest = None
+    health = None
     bad = 0
+    bad_reasons: set[str] = set()
 
     while True:
         try:
@@ -97,7 +99,10 @@ def listen(port: int, expect_version: str | None, report_every: float = 5.0) -> 
                 header = unpack_header(buf)
             except BadPacket as e:
                 bad += 1
-                print(f"[listen] ignored packet from {addr[0]}: {e}")
+                if str(e) not in bad_reasons:
+                    bad_reasons.add(str(e))
+                    hint = " (rebuild and recopy the plugin)" if "protocol" in str(e) else ""
+                    print(f"[listen] ignoring packets from {addr[0]}: {e}{hint}")
                 continue
             if sender != addr:
                 sender = addr
@@ -110,6 +115,7 @@ def listen(port: int, expect_version: str | None, report_every: float = 5.0) -> 
                     seqs = SeqTracker()
                     seqs.see(header.seq)
                 last_uptime = hb.uptime_ms
+                health = hb
                 if expect_version and hb.game_version != expect_version:
                     print(f"[listen] WARNING: plugin built for {hb.game_version}, expected {expect_version}")
             elif header.kind == KIND_STATE:
@@ -127,6 +133,12 @@ def listen(port: int, expect_version: str | None, report_every: float = 5.0) -> 
             fps = frames.window_frames / (now - last_report)
             frames.window_frames = 0
             last_report = now
+            if health is not None:
+                hook = "installed" if health.hook_installed else "NOT installed"
+                print(
+                    f"[listen] hook {hook}, fighter frames seen {health.fighter_calls}, "
+                    f"frames queued {health.frames_queued}"
+                )
             if seqs.received:
                 print(
                     f"[listen] packets {seqs.received}, lost {seqs.missing} ({seqs.loss_pct:.2f}%), "
