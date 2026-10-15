@@ -95,6 +95,12 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
             return;
         }
         let fighter = read_fighter(acc, entry);
+        // The results screen keeps fighters alive in DEMO (victory/clap
+        // animations). Not gameplay: don't send it, and don't refresh
+        // last_seen, so the next real match is detected as a new one.
+        if fighter.status_kind == *FIGHTER_STATUS_KIND_DEMO {
+            return;
+        }
 
         let mut c = match COLLECTOR.lock() {
             Ok(c) => c,

@@ -12,6 +12,7 @@ import socket
 import time
 
 from .kinds import kind_name
+from .statuses import status_name
 from .protocol import Fighter
 from .wire import KIND_HEARTBEAT, KIND_STATE, BadPacket, unpack_header, unpack_heartbeat, unpack_state
 
@@ -69,7 +70,21 @@ def describe(port: int, f: Fighter) -> str:
     return (
         f"P{port} {kind_name(f.fighter_kind):<10} {f.damage:6.1f}%  "
         f"({f.pos_x:7.1f}, {f.pos_y:7.1f})  {stocks} stk  {where:<6} "
-        f"status {f.status_kind}"
+        f"{status_name(f.status_kind)}"
+    )
+
+
+def winner_line(final) -> str:
+    a, b = final.bot, final.opponent
+    if a.stocks > b.stocks:
+        result = f"P1 {kind_name(a.fighter_kind)} wins"
+    elif b.stocks > a.stocks:
+        result = f"P2 {kind_name(b.fighter_kind)} wins"
+    else:
+        result = "no winner by stocks (time out or ended early)"
+    return (
+        f"[listen] match ended after {final.frame + 1} frames: {result}. "
+        f"Final stocks {a.stocks}-{b.stocks}, damage {a.damage:.1f}%-{b.damage:.1f}%"
     )
 
 
@@ -85,6 +100,8 @@ def listen(port: int, expect_version: str | None, report_every: float = 5.0) -> 
     last_uptime = 0
     last_report = last_live = time.monotonic()
     latest = None
+    final = None  # last frame of the current match
+    last_state_at = 0.0
     health = None
     bad = 0
     bad_reasons: set[str] = set()
@@ -121,9 +138,18 @@ def listen(port: int, expect_version: str | None, report_every: float = 5.0) -> 
             elif header.kind == KIND_STATE:
                 _, latest = unpack_state(buf)
                 if frames.see(latest.frame):
+                    if final is not None:
+                        print(winner_line(final))
                     print("[listen] match started")
+                final = latest
+                last_state_at = time.monotonic()
 
         now = time.monotonic()
+        # The plugin stops sending state on the results screen.
+        if final is not None and now - last_state_at > 1.5:
+            print(winner_line(final))
+            final = None
+            frames.last_frame = None
         if latest is not None and now - last_live >= 1.0:
             last_live = now
             print(f"[frame {latest.frame:>6}]  {describe(1, latest.bot)}")
