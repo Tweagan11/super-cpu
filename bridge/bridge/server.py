@@ -9,10 +9,8 @@ import argparse
 import socket
 import time
 
-from .policy import History, IdlePolicy, Policy, WalkTowardPolicy
+from .policy import POLICIES, History, Policy
 from .protocol import FRAME_SIZE, decode_frame, encode_inputs
-
-POLICIES: dict[str, type] = {"idle": IdlePolicy, "walk": WalkTowardPolicy}
 
 
 def recv_exact(conn: socket.socket, n: int) -> bytes | None:

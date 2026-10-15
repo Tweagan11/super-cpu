@@ -1,9 +1,11 @@
 """Listen for packets from the Switch plugin and report what arrives.
 
     python -m bridge.udp_listen --port 4243 --expect-version 13.0.4
+    python -m bridge.udp_listen --log --stage battlefield   # also write each match to data/matches/
 
 Prints the Switch's address on the first packet, the live fighter state once
-a second during a match, and a status line every 5 seconds.
+a second during a match, and a status line every 5 seconds. Match start/end
+detection lives in matches.py so the logger and eval share it.
 """
 from __future__ import annotations
 
@@ -12,9 +14,10 @@ import socket
 import time
 
 from .kinds import kind_name
+from .matches import FrameTracker, MatchEnded, MatchStarted, MatchWatcher  # noqa: F401 (FrameTracker re-exported)
 from .statuses import status_name
-from .protocol import Fighter
-from .wire import KIND_HEARTBEAT, KIND_STATE, BadPacket, unpack_header, unpack_heartbeat, unpack_state
+from .protocol import Fighter, Frame
+from .wire import BadPacket, Heartbeat
 
 
 class SeqTracker:
@@ -44,26 +47,6 @@ class SeqTracker:
         return 100.0 * self.missing / total if total else 0.0
 
 
-class FrameTracker:
-    """Counts game frames received, frames skipped, and frames per second."""
-
-    def __init__(self) -> None:
-        self.last_frame: int | None = None
-        self.frames = 0
-        self.skipped = 0
-        self.window_frames = 0
-
-    def see(self, frame: int) -> bool:
-        """Returns True when this frame starts a new match."""
-        new_match = self.last_frame is None or frame < self.last_frame
-        if not new_match and frame > self.last_frame + 1:
-            self.skipped += frame - self.last_frame - 1
-        self.last_frame = frame
-        self.frames += 1
-        self.window_frames += 1
-        return new_match
-
-
 def describe(port: int, f: Fighter) -> str:
     where = "air" if f.airborne else "ground"
     stocks = "?" if f.stocks < 0 else str(f.stocks)
@@ -88,32 +71,49 @@ def winner_line(final) -> str:
     )
 
 
-def listen(port: int, expect_version: str | None, report_every: float = 5.0) -> None:
+class ListenPrinter:
+    """MatchWatcher observer that prints match start and end lines."""
+
+    def on_match_start(self, ev: MatchStarted) -> None:
+        print("[listen] match started")
+
+    def on_match_end(self, ev: MatchEnded) -> None:
+        print(winner_line(ev.final))
+
+
+def make_watcher(observers: list | None = None) -> MatchWatcher:
+    """The listener's watcher: prints match lines, then any extra observers (e.g. MatchLogger)."""
+    return MatchWatcher([ListenPrinter(), *(observers or [])])
+
+
+def listen(
+    port: int, expect_version: str | None, report_every: float = 5.0,
+    watcher: MatchWatcher | None = None, stop_after: float | None = None,
+) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("0.0.0.0", port))
     sock.settimeout(0.2)
     print(f"[listen] waiting for the Switch on UDP :{port}")
 
+    watcher = watcher or make_watcher()
+    frames = watcher.boundary.frames
     seqs = SeqTracker()
-    frames = FrameTracker()
     sender = None
     last_uptime = 0
-    last_report = last_live = time.monotonic()
+    started = last_report = last_live = time.monotonic()
     latest = None
-    final = None  # last frame of the current match
-    last_state_at = 0.0
     health = None
     bad = 0
     bad_reasons: set[str] = set()
 
-    while True:
+    while stop_after is None or time.monotonic() - started < stop_after:
         try:
             buf, addr = sock.recvfrom(2048)
         except socket.timeout:
             buf = None
         if buf is not None:
             try:
-                header = unpack_header(buf)
+                header, msg = watcher.packet(buf, time.monotonic())
             except BadPacket as e:
                 bad += 1
                 if str(e) not in bad_reasons:
@@ -125,8 +125,8 @@ def listen(port: int, expect_version: str | None, report_every: float = 5.0) -> 
                 sender = addr
                 print(f"[listen] Switch found at {addr[0]}:{addr[1]}")
             seqs.see(header.seq)
-            if header.kind == KIND_HEARTBEAT:
-                hb = unpack_heartbeat(buf)
+            if isinstance(msg, Heartbeat):
+                hb = msg
                 if last_uptime and hb.uptime_ms < last_uptime:
                     print("[listen] uptime went backwards: the plugin restarted")
                     seqs = SeqTracker()
@@ -135,21 +135,12 @@ def listen(port: int, expect_version: str | None, report_every: float = 5.0) -> 
                 health = hb
                 if expect_version and hb.game_version != expect_version:
                     print(f"[listen] WARNING: plugin built for {hb.game_version}, expected {expect_version}")
-            elif header.kind == KIND_STATE:
-                _, latest = unpack_state(buf)
-                if frames.see(latest.frame):
-                    if final is not None:
-                        print(winner_line(final))
-                    print("[listen] match started")
-                final = latest
-                last_state_at = time.monotonic()
+            elif isinstance(msg, Frame):
+                latest = msg
 
         now = time.monotonic()
         # The plugin stops sending state on the results screen.
-        if final is not None and now - last_state_at > 1.5:
-            print(winner_line(final))
-            final = None
-            frames.last_frame = None
+        watcher.poll(now)
         if latest is not None and now - last_live >= 1.0:
             last_live = now
             print(f"[frame {latest.frame:>6}]  {describe(1, latest.bot)}")
@@ -179,8 +170,31 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=4243)
     ap.add_argument("--expect-version", default="13.0.4")
+    ap.add_argument("--log", nargs="?", const="", default=None, metavar="DIR",
+                    help="write each match through MatchLogger (default dir data/matches)")
+    ap.add_argument("--stage", default="fd", help="stage layout until stage_id is streamed: battlefield, fd, omega")
+    ap.add_argument("--mod-hash", default="unset")
+    ap.add_argument("--p1", default="unknown", help="who's on port 1: a name, bot:<model>, or cpu:9")
+    ap.add_argument("--p2", default="unknown", help="who's on port 2")
+    ap.add_argument("--seconds", type=float, default=None, help="stop after this long")
     args = ap.parse_args()
-    listen(args.port, args.expect_version)
+    observers = []
+    if args.log is not None:
+        from .logger import MatchLogger
+        from .stages import layout_by_name
+
+        layout_by_name(args.stage)  # fail early on a typo
+        observers.append(MatchLogger(
+            out_dir=args.log or None, expect_version=args.expect_version, mod_hash=args.mod_hash,
+            stage=args.stage, controllers=(args.p1, args.p2),
+        ))
+    watcher = make_watcher(observers)
+    try:
+        listen(args.port, args.expect_version, watcher=watcher, stop_after=args.seconds)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        watcher.close(time.monotonic())  # a match cut off by Ctrl-C still gets logged, marked incomplete
 
 
 if __name__ == "__main__":
