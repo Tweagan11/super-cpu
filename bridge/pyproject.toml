@@ -5,7 +5,10 @@ requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
 
 [project.optional-dependencies]
-train = ["torch>=2.2", "pyarrow>=15"]
+# Training (training/ at the repo root) and `--policy bc`. Training isn't its own
+# package: install the bridge with this extra and run `python -m training.train_bc`
+# from the repo root. pyarrow was listed early on but nothing uses it.
+train = ["torch>=2.2"]
 
 [build-system]
 requires = ["setuptools>=68"]

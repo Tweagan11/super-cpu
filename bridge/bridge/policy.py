@@ -46,6 +46,19 @@ def _scripted() -> Policy:
     return ScriptedRobPolicy()
 
 
+def _bc() -> Policy:
+    """Behavior cloning checkpoint (training/bc_policy.py). Needs torch (the
+    `train` extra) and SCPU_CHECKPOINT=path/to/best.pt. training/ lives next to
+    bridge/ in the repo, not in this package, so put the repo root on the path."""
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[2]
+    if (repo / "training" / "bc_policy.py").exists() and str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from training.bc_policy import BCPolicy
+    return BCPolicy()
+
+
 # Every selectable policy, by the name `--policy NAME` takes. Values are
 # zero-arg factories, so a policy reads its own config (see scripted.py).
 # Add new policies here and nowhere else.
@@ -53,4 +66,5 @@ POLICIES: dict[str, Callable[[], Policy]] = {
     "idle": IdlePolicy,
     "walk": WalkTowardPolicy,
     "scripted": _scripted,
+    "bc": _bc,
 }
