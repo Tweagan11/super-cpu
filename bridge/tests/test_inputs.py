@@ -279,3 +279,18 @@ class EndToEndTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AckStatsTests(unittest.TestCase):
+    def test_counts_again_after_frame_counter_restarts(self):
+        from bridge.run import AckStats
+        from bridge.wire import Ack, Header
+        h = Header(4, 4, 0)
+        st = AckStats()
+        for f in range(1000, 2000):
+            st.add(Ack(h, f, f + 3, f + 2))
+        st.add(Ack(h, 1999, 2002, 2001))  # a real duplicate
+        self.assertEqual(len(st), 1000)
+        for f in range(0, 100):          # next match: the frame counter restarts
+            st.add(Ack(h, f, f + 3, f + 2))
+        self.assertEqual(len(st), 1100)

@@ -87,8 +87,15 @@ class AckStats:
     round_trips: list[int] = field(default_factory=list)  # ready_frame - for_frame
     delays: list[int] = field(default_factory=list)  # applied_frame - for_frame
     seen: set[int] = field(default_factory=set)
+    last_for: int = -1
 
     def add(self, a: Ack) -> None:
+        # Frame numbers restart every match. Without this, every ack after the
+        # first match looked like a duplicate and the count froze (hardware,
+        # 2026-10-16: acks stuck at 1890 while the plugin kept applying).
+        if a.for_frame + 600 < self.last_for:
+            self.seen.clear()
+        self.last_for = a.for_frame
         if a.for_frame in self.seen:
             return
         self.seen.add(a.for_frame)
