@@ -66,3 +66,9 @@ The probe is there so that switching later is cheap: one hardware session tells 
 | Does FIM run on the same thread as the fighter hook? | `state::live_frame()` uses `try_lock` so the input hook never waits. If they're on different threads and collide, that one frame goes to the real controller | Watch for `neutral` or stray frames in the status line with a steady bridge. If it shows up, move the frame counter into an atomic |
 | What `controller_index` values do CPUs get? | Decides whether we can take over a CPU slot later | `bridge.run` prints `cpu controller_index seen [...]` every 30 s. Try with one CPU on port 2, then port 3 |
 | Do the needles still match on 13.0.4? | The modpack's offsets comments are older than its latest release, but its CI ships against current versions | Boot log (`cargo skyline listen`) says `found FIM at text+0x...`; the control status says `input hook installed` |
+
+## UDP receive on the Switch (2026-10-16, found on hardware)
+
+- `UdpSocket::try_clone` fails (os error 1), so the receive thread shares the send socket through an `Arc` instead.
+- A socket bound to `0.0.0.0:0` has no usable port until it has sent something: `recv_from` before the first send fails with os error 1. The receive thread starts after the first heartbeat goes out, and that fixed it.
+- One thread blocking in `recv_from` (20 ms read timeout) while another sends on the same socket works. One state send took 4.05 ms in the first session; the plugin now reports every 10 s how many sends went over 4 ms, to tell Wi-Fi jitter apart from sends waiting on the receive.

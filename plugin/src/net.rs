@@ -224,9 +224,10 @@ fn spawn_receiver(s: Arc<UdpSocket>, pc_ip: Option<IpAddr>) -> bool {
 }
 
 const RECV_TIMEOUT: Duration = Duration::from_millis(20);
-/// A send slower than this while receiving is logged once: it would mean the
-/// socket layer makes sends wait for the blocked receive.
+/// Sends slower than this are counted and reported: lots of them would mean
+/// the socket layer makes sends wait for the blocked receive.
 const SLOW_SEND: Duration = Duration::from_millis(4);
+const SEND_REPORT_EVERY: Duration = Duration::from_secs(10);
 const LOG_RESEND_EVERY: Duration = Duration::from_secs(5);
 
 /// Runs forever on its own thread: forwards each finished frame as a state
@@ -258,7 +259,10 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
         let mut next_heartbeat = Instant::now();
         let mut next_log_resend = Instant::now();
         let mut logs_sent = 0u32;
-        let mut warned_slow = false;
+        // Send timing, reported every SEND_REPORT_EVERY when any send was slow:
+        // tells whether sends ever wait on the blocked receive.
+        let (mut sends, mut slow_sends, mut slowest) = (0u32, 0u32, Duration::ZERO);
+        let mut next_send_report = Instant::now() + SEND_REPORT_EVERY;
         'conn: loop {
             while let Ok(a) = acks.try_recv() {
                 if !send(&sock, &ack_packet(seq, &a), &target) {
@@ -275,11 +279,10 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
                         break;
                     }
                     let took = t.elapsed();
-                    if receiving && took > SLOW_SEND && !warned_slow {
-                        warned_slow = true;
-                        log::log(format!(
-                            "state send took {took:?} while receiving: sends may be waiting on the receive"
-                        ));
+                    sends += 1;
+                    slowest = slowest.max(took);
+                    if took > SLOW_SEND {
+                        slow_sends += 1;
                     }
                     seq = seq.wrapping_add(1);
                 }
@@ -298,6 +301,17 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
                 }
                 seq = seq.wrapping_add(1);
                 logs_sent = logs_sent.max(id + 1);
+            }
+            if Instant::now() >= next_send_report {
+                next_send_report = Instant::now() + SEND_REPORT_EVERY;
+                if slow_sends > 0 {
+                    log::log(format!(
+                        "send timing ({}s): {slow_sends} of {sends} state sends over {SLOW_SEND:?}, slowest {slowest:?}, receiving {}",
+                        SEND_REPORT_EVERY.as_secs(),
+                        if receiving { "on" } else { "off" }
+                    ));
+                }
+                (sends, slow_sends, slowest) = (0, 0, Duration::ZERO);
             }
             // Checked every pass so heartbeats keep going during matches too.
             if Instant::now() >= next_heartbeat {
