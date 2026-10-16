@@ -112,6 +112,10 @@ def synthetic_frames(n_frames: int, rng: random.Random, stage_id: int) -> list[F
                 f = replace(f, status_kind=ATTACK_S3)
             fs.append(f)
         frames.append(Frame(i, stage_id, fs[0], fs[1]))
+    # The last frame shows one fighter out of stocks, like the real end of a
+    # stock match. Without it the watcher would treat the stop as a pause.
+    last = frames[-1]
+    frames[-1] = replace(last, opponent=replace(last.opponent, stocks=0))
     return frames
 
 

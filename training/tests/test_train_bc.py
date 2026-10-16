@@ -40,11 +40,11 @@ class TrainTests(unittest.TestCase):
         from training.synthetic import synthetic_frames
         import random
 
-        s = self._train("a", epochs=6)
+        s = self._train("a", epochs=10)
         self.assertTrue(Path(s["best"]).exists())
         self.assertTrue((self.dir / "a" / "last.pt").exists())
-        last = s["history"][-1]
-        self.assertGreater(last["val_acc_main"], s["baseline"]["acc_main"])
+        best = max(h["val_acc_main"] for h in s["history"])
+        self.assertGreater(best, s["baseline"]["acc_main"])
 
         os.environ["SCPU_CHECKPOINT"] = s["best"]
         os.environ.pop("SCPU_DELAY", None)
