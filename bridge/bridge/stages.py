@@ -9,8 +9,8 @@ Two halves:
   Modpack groups ids the same way in `src/training/tech.rs`: `End_*` ids are
   the Omega (FD layout) forms of each stage, `Battle_*` ids the Battlefield
   forms. Note 0 is a real id: plain Battlefield.
-- Layout geometry, used by the scripted bot and the features. Battlefield is
-  measured on hardware with `python -m bridge.measure`; FD is still a guess.
+- Layout geometry, used by the scripted bot and the features. Battlefield and
+  FD are measured on hardware with `python -m bridge.measure`.
 
 `resolve_layout(stage_id, fallback)` is the one place that picks a layout: the
 streamed stage id when it maps to a layout we know, else the --stage flag.
@@ -451,8 +451,8 @@ BATTLEFIELD = StageLayout(
         Platform(-16.6, 17.2, 47.2),
     ),
 )
-# TODO(measure): FD is still an estimate.
-FINAL_DESTINATION = StageLayout(name=LAYOUT_FD, ledge_x=85.0)
+# Measured on hardware with bridge.measure (13.0.4, R.O.B., 2026-10-16).
+FINAL_DESTINATION = StageLayout(name=LAYOUT_FD, center_x=0.0, ledge_x=79.9, ground_y=0.0)
 
 LAYOUTS: dict[str, StageLayout] = {
     LAYOUT_BATTLEFIELD: BATTLEFIELD,
