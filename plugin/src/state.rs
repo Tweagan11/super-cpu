@@ -202,6 +202,11 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
                 color,
                 c.current.stage_id
             );
+            // SSB-24: compare with what the force hook wrote (None unless
+            // force_fighter is on and this port is in force_ports).
+            if let Some(msg) = crate::force::check(entry as u8 + 1, fighter.fighter_kind, color) {
+                crate::log::log(msg);
+            }
         }
     }
 }

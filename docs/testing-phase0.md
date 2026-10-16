@@ -305,6 +305,43 @@ python -m bridge.run --policy scripted --log --eval 3 --model scripted --auto-re
 
 Start the first match by hand and walk away. Expect 3 `[log] wrote` lines and 3 `[eval] game` lines, with only a handful of `[rematch]` lines per screen. Anything stuck for over a minute is a wrong scene name or an unpressed screen: look at the last `[run] scene:` line.
 
+## 12. Forced green R.O.B. (SSB-24)
+
+The plugin forces the fighter and costume at the decided-fighter record, so nobody has to move a cursor. This is experiment E5 from `css-research.md`, with the forcing on. Game 13.0.4 only.
+
+### 12a. Config
+
+Add to `sd:/ultimate/super-cpu/config.toml`:
+
+```
+force_fighter = true
+force_ports = [2]
+force_costume = 5
+```
+
+Boot the game and watch `bridge.run` or `udp_listen`. Expect `[switch] force_fighter on: ports [2] -> robot c05, hook at text+0x1a0d540, copy hook at text+0x1798ac8`. A crash on boot means the inline copy hook: set `force_copy_hook = false` and try again, and tell me.
+
+### 12b. Random on the bot's card
+
+Put the bot's card (port 2) on Random, start the match, and keep the log. Expect, in order:
+
+- `force pre: P2 saw hash 0x... c.. raw w0 0x2 ...; wrote hash 0x0e18857219 c05`, then `force post: ...`, and a `dump ... before:` line. Keep these lines, they are the E5 answer (does it fire, what the record looks like).
+- `force check: P2 robot c05 OK` right after `match started`, and green R.O.B. in the match.
+
+If P2 is the wrong fighter or `MISMATCH`: look at the dump. If the old hash is in the second 8 byte group (`w2`), the main key is word 2, not 3.
+
+### 12c. Non-Random pick
+
+Rematch with the bot's card on a fixed character (say Mario). Does `force pre` still show up? If it does and the check says OK, the forcing works for any pick. If there are no `force` lines, the function only runs for Random and the CPU card needs another route; report it.
+
+### 12d. A CPU card
+
+Use a CPU card on port 2 (no controller assigned, level 9) and leave it untouched. Same expectations. Then, as a second test, `force_ports = [1, 2]` with a human on port 1: P1 should become R.O.B. as well, and the check line for P1 appears too (the in-match check covers ports 1 and 2).
+
+### 12e. Off by default
+
+Remove the `force_` lines (or set `force_fighter = false`), reboot: no `force` lines, nothing hooked.
+
 ## If nothing shows up
 
 | Symptom | Likely cause |
@@ -331,6 +368,8 @@ Start the first match by hand and walk away. Expect 3 `[log] wrote` lines and 3 
 | `late` climbing as fast as `applied` | The network is slower than `--delay`. Raise it, or run `bridge.latency` to pick one |
 | `applied` climbing but the bot doesn't move | Wrong port: check the "plugin drives port" warning, then the port-or-slot check in 9c |
 | The bot moves but so does P1 | `player_idx` is the controller slot, see 9c |
+| `force check: P2 NOT FORCED` or no `force` lines with `force_fighter = true` | The decided-fighter hook doesn't run for that card (see 12c/12d), or the first argument isn't the record. Send me the log |
+| `force check: P2 MISMATCH` | Hash in the wrong word or the copy hook not carrying it. Send me the `dump` lines (12b) |
 | "plugin drives port X but --bot-port is Y" | Make `--bot-port` match `bot_port` in config.toml |
 
 ## Seeing plugin logs
