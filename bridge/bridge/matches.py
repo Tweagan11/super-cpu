@@ -128,9 +128,6 @@ def winner_port(final: Frame) -> int | None:
     return 1 if a.stocks > b.stocks else 2
 
 
-START_STOCKS_FRAMES = 60
-
-
 @dataclass
 class MatchSummary:
     """Running totals for one match, cheap enough to keep for every frame."""
@@ -148,11 +145,11 @@ class MatchSummary:
 
     def add(self, frame: Frame) -> None:
         self.frame_count += 1
-        # On hardware a fighter's stock count can read 0 for the first frames
-        # of a match (seen for P2 on 2026-10-16), so take the most seen early on.
-        if self.frame_count <= START_STOCKS_FRAMES:
-            for i, f in enumerate(fighters(frame)):
-                self.start_stocks[i] = max(self.start_stocks[i], f.stocks)
+        # On hardware a fighter's stock count reads 0 for the first frames of
+        # a match (P2, 2026-10-16: 0 0 0 0 0 then 3). Stocks never go up
+        # during a match, so the most seen is the start count.
+        for i, f in enumerate(fighters(frame)):
+            self.start_stocks[i] = max(self.start_stocks[i], f.stocks)
         if self._prev is not None:
             for i, (old, new) in enumerate(zip(fighters(self._prev), fighters(frame))):
                 # Damage resets to 0 on a stock loss, so only count increases.
