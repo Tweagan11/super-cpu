@@ -59,6 +59,18 @@ def _bc() -> Policy:
     return BCPolicy()
 
 
+def _rl() -> Policy:
+    """RL fine-tuning of a BC checkpoint (training/rl.py, SSB-21). Needs torch
+    and SCPU_CHECKPOINT=path/to/best.pt (or SCPU_RL_RESUME=path/to/last.pt)."""
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[2]
+    if (repo / "training" / "rl.py").exists() and str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from training.rl import RLPolicy
+    return RLPolicy()
+
+
 # Every selectable policy, by the name `--policy NAME` takes. Values are
 # zero-arg factories, so a policy reads its own config (see scripted.py).
 # Add new policies here and nowhere else.
@@ -67,4 +79,5 @@ POLICIES: dict[str, Callable[[], Policy]] = {
     "walk": WalkTowardPolicy,
     "scripted": _scripted,
     "bc": _bc,
+    "rl": _rl,
 }

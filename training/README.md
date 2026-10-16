@@ -7,7 +7,7 @@
 | SSB-16 Behavior cloning | `train_bc.py`, `bc_policy.py` | done, verified on synthetic data only |
 | SSB-26 Inverse dynamics (IDM) | `idm.py` | done, verified on synthetic data only |
 | SSB-18 DAgger | `dagger.py` | not started |
-| SSB-21 RL fine-tune | `rl.py` | not started |
+| SSB-21 RL fine-tune | `rl.py` | done, verified against the fake Switch only |
 
 Rules that keep data usable:
 
@@ -38,6 +38,7 @@ the right `--index-url`), then the line above.
 | `train_bc.py` | the trainer, model (`BCNet`) and checkpoint load/save |
 | `bc_policy.py` | `BCPolicy`, registered as `--policy bc` in `bridge/bridge/policy.py` |
 | `idm.py` | inverse dynamics model: `train`, `eval`, `label` (reuses `BCNet`, `window_features`) |
+| `rl.py` | PPO fine-tuning of a BC checkpoint, `RLPolicy` registered as `--policy rl` |
 | `synthetic.py` | fake logged matches with known labels, for tests before real data exists |
 | `smoke_test.py` | the whole pipeline end to end on synthetic data |
 | `tests/` | unit tests |
@@ -169,6 +170,42 @@ through `bridge.run` with 0 late inputs at `--delay 2`.
 - `SCPU_DEVICE`: `cpu` (default) or `cuda`. One `act()` (features + forward
   + decode) takes about 0.6 ms on one CPU thread, and the forward pass alone
   about 0.12 ms. The GRU variant's forward pass is about 0.85 ms on CPU.
+
+## RL fine-tuning (SSB-21)
+
+```
+SCPU_CHECKPOINT=checkpoints/<run>/best.pt python -m bridge.run --policy rl \
+    --auto-rematch --stocks 1 --log
+```
+
+1 stock, R.O.B. vs level 9 CPU, unattended. Resume with
+`SCPU_RL_RESUME=checkpoints/rl/<run>` (or a `last.pt`) instead of
+`SCPU_CHECKPOINT`. Needs torch. The full design is in the `rl.py` docstring;
+the short version:
+
+- Acting and learning are split. The policy samples from the current weights
+  and records (features, action, logprob, value) per decision. Each match
+  becomes an episode for a learner thread that runs PPO every
+  `matches_per_update` matches, with its own model copy. New weights are
+  swapped in at the start of the next match, never mid-match, and the frame
+  loop never waits on the learner. `SCPU_RL_ASYNC_LEARN=0` updates inline.
+- Reward comes from bridge frame fields only: damage dealt (+) and taken (-),
+  stock taken (+5) and lost (-5), extra penalty for a probable self-destruct,
+  small per-frame penalty for time offstage past a grace period. Nothing is
+  counted until both fighters show stocks > 0 (hardware reads 0 at the start).
+- Delay: the decision on frame t applies on t + delay, so its reward is the
+  one seen on that later frame (`effect_lag` shifts it further). GAE runs
+  over decisions with the match end as terminal.
+- KL(pi || pi_BC) penalty (`kl_coef`), entropy bonus (`ent_coef`), value head
+  trained alone for the first 2 updates, PPO clipping and a target_kl stop.
+- Output: `data/rl/<run>/matches.csv` (return, win/loss, damage, stocks,
+  entropy), `updates.csv`, `config.json`. `checkpoints/rl/<run>/last.pt`
+  every `ckpt_every` matches and `best.pt` by rolling win rate. Both load with
+  `--policy bc` (greedy play of the tuned weights).
+- Config: `SCPU_RL_<FIELD>` for every `RLConfig` field (lr, kl_coef,
+  matches_per_update, learn_device, greedy, ...) and `SCPU_RL_REWARD_<FIELD>`
+  for every `RewardConfig` field. `SCPU_RL_LEARN=0` or `SCPU_RL_GREEDY=1`
+  plays without learning, for evaluating a checkpoint.
 
 ## Tests
 

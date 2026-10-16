@@ -200,6 +200,13 @@ class Bridge:
         self.menu_seq = 0
         self.scene_name: str | None = None
         self._warned_menu = False
+        # Learning policies (training/rl.py) want to know the real delay and
+        # port, and to hear about match boundaries and shutdown.
+        configure = getattr(policy, "configure", None)
+        if configure is not None:
+            configure(delay=delay, bot_port=bot_port)
+        if hasattr(policy, "on_match_start") or hasattr(policy, "on_match_end"):
+            hooks.append(policy)
         self.watcher = MatchWatcher([*hooks, *observers], bot_port=bot_port)
         self.frames = self.watcher.boundary.frames
         self.acks = AckStats()
@@ -225,6 +232,9 @@ class Bridge:
         """Ends a match in progress (logged as interrupted) and closes the socket."""
         self.watcher.close(time.monotonic())
         self.sock.close()
+        close = getattr(self.policy, "close", None)
+        if close is not None:
+            close()
 
     def poll(self, timeout: float) -> int | None:
         """Handle at most one packet. Returns its kind, or None on timeout/bad.
