@@ -9,10 +9,8 @@ Two halves:
   Modpack groups ids the same way in `src/training/tech.rs`: `End_*` ids are
   the Omega (FD layout) forms of each stage, `Battle_*` ids the Battlefield
   forms. Note 0 is a real id: plain Battlefield.
-- Layout geometry, used by the scripted bot. These numbers are rough,
-  conservative guesses in game units, not measured values. Measure them on
-  hardware (stand at each ledge and on each platform, read pos from
-  udp_listen) before trusting the scripted bot near edges.
+- Layout geometry, used by the scripted bot and the features. Battlefield is
+  measured on hardware with `python -m bridge.measure`; FD is still a guess.
 
 `resolve_layout(stage_id, fallback)` is the one place that picks a layout: the
 streamed stage id when it maps to a layout we know, else the --stage flag.
@@ -440,16 +438,20 @@ class StageLayout:
         return y < self.ground_y
 
 
-# TODO(measure): ledge and platform numbers are estimates.
+# Measured on hardware with bridge.measure (13.0.4, R.O.B., 2026-10-16).
+# Positions are where a fighter's origin can stand, so the real ledge is a bit further out.
 BATTLEFIELD = StageLayout(
     name=LAYOUT_BATTLEFIELD,
-    ledge_x=70.0,
+    center_x=-0.3,
+    ledge_x=79.6,
+    ground_y=0.0,
     platforms=(
-        Platform(-55.0, -20.0, 27.0),
-        Platform(20.0, 55.0, 27.0),
-        Platform(-18.0, 18.0, 54.0),
+        Platform(-58.5, -25.4, 24.1),
+        Platform(25.0, 59.4, 24.1),
+        Platform(-16.6, 17.2, 47.2),
     ),
 )
+# TODO(measure): FD is still an estimate.
 FINAL_DESTINATION = StageLayout(name=LAYOUT_FD, ledge_x=85.0)
 
 LAYOUTS: dict[str, StageLayout] = {

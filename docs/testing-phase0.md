@@ -259,7 +259,7 @@ Then with the bridge driving P2 (`python -m bridge.run --policy walk --log`): fi
 | Heartbeat game version shows empty or garbage | The version read at boot failed. Send me the listener output |
 | Game crashes when a match starts on the new build only | One of the new reads (velocity, shield, jumps, stage) is bad. Send the crash report |
 | `bridge.run` says "input hook NOT installed" | The final input mapping pattern wasn't found (game version?). State still works. Send me the `cargo skyline listen` boot log |
-| "receiving NO" | The Switch socket couldn't be made non-blocking, so inputs are off to protect the state stream. Send me the boot log |
+| "receiving NO" | The plugin's receive self-test failed. It now retries every 5 s for a minute (the network often isn't up yet at boot), so it should flip to yes once you're in the menus. If it stays NO, `cargo skyline listen` shows `input receive test N/12 failed: <reason>`: send me that line |
 | Inputs sent, status line `switch: rx 0 applied 0`, `rejected` climbing | Packets arrive but get refused. Usually the PC's IP isn't the `pc_ip` in config.toml (the plugin only takes input from that IP, e.g. a PC with two network adapters) |
 | Inputs sent, `rx` and `rejected` both stay 0 | Replies aren't reaching the Switch. Router or AP isolation dropping them, or a firewall on the PC blocking outbound UDP |
 | `late` climbing as fast as `applied` | The network is slower than `--delay`. Raise it, or run `bridge.latency` to pick one |

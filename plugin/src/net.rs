@@ -170,27 +170,49 @@ fn setup_receive(sock: &UdpSocket) -> bool {
     nonblocking || timeout
 }
 
-/// One-time check that an empty receive really comes back right away. If
-/// the socket layer accepted our settings but ignored them, `recv_from`
-/// would block until a packet arrives, and since the PC only sends inputs
-/// in answer to state, state would stop for good. So test it on a throwaway
-/// socket in a throwaway thread first. If the test hangs, that thread and
-/// socket just sit there unused, and inputs stay off.
-fn receive_works() -> bool {
+/// Check that an empty receive really comes back right away. If the socket
+/// layer accepted our settings but ignored them, `recv_from` would block until
+/// a packet arrives, and since the PC only sends inputs in answer to state,
+/// state would stop for good. So test it on a throwaway socket in a throwaway
+/// thread first. If the test hangs, that thread and socket just sit there
+/// unused. Err says why it failed, for the log.
+///
+/// This runs at boot, when the network often isn't up yet (bind fails), so
+/// `run` retries it a few times instead of turning inputs off for good.
+fn receive_works() -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new().spawn(move || {
-        let ok = match UdpSocket::bind("0.0.0.0:0") {
-            Ok(s) if setup_receive(&s) => {
-                let mut buf = [0u8; 8];
-                let t = Instant::now();
-                matches!(s.recv_from(&mut buf), Err(_)) && t.elapsed() < Duration::from_millis(100)
+        let r = match UdpSocket::bind("0.0.0.0:0") {
+            Err(e) => Err(format!("test bind failed: {e}")),
+            Ok(s) => {
+                let nb = s.set_nonblocking(true);
+                let to = s.set_read_timeout(Some(POLL));
+                if nb.is_err() && to.is_err() {
+                    Err(format!("set_nonblocking: {nb:?}, set_read_timeout: {to:?}"))
+                } else {
+                    let mut buf = [0u8; 8];
+                    let t = Instant::now();
+                    match s.recv_from(&mut buf) {
+                        Ok(_) => Err("test socket got a packet?".into()),
+                        Err(_) if t.elapsed() < Duration::from_millis(100) => Ok(()),
+                        Err(e) => Err(format!("empty receive took {:?} ({e})", t.elapsed())),
+                    }
+                }
             }
-            _ => false,
         };
-        let _ = tx.send(ok);
+        let _ = tx.send(r);
     });
-    spawned.is_ok() && rx.recv_timeout(Duration::from_millis(500)).unwrap_or(false)
+    if let Err(e) = spawned {
+        return Err(format!("thread spawn failed: {e}"));
+    }
+    rx.recv_timeout(Duration::from_millis(500))
+        .unwrap_or_else(|_| Err("empty receive blocked for 500 ms".into()))
 }
+
+/// Retries for `receive_works`, spaced out so a boot-time failure (network
+/// not up yet) doesn't disable inputs for the whole session.
+const PROBE_TRIES: u32 = 12;
+const PROBE_EVERY: Duration = Duration::from_secs(5);
 
 /// Runs forever on its own thread: forwards each finished frame as a state
 /// packet, sends a heartbeat (plus a control status packet) every 500 ms,
@@ -204,10 +226,9 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
     let mut seq: u32 = 0;
     let mut rx = InputReceiver::new();
     let mut live_frame: u32 = 0;
-    let can_receive = receive_works();
-    if !can_receive {
-        println!("[super-cpu] non-blocking UDP receive doesn't work here, inputs disabled");
-    }
+    let mut can_receive = false;
+    let mut probes = 0u32;
+    let mut next_probe = Instant::now();
     loop {
         let sock = match UdpSocket::bind("0.0.0.0:0") {
             Ok(s) => s,
@@ -219,14 +240,30 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
         };
         // Never let a receive stall the send loop. If that can't be
         // guaranteed, inputs are off but state keeps flowing.
-        let mut receiving = can_receive && setup_receive(&sock);
-        input::RECEIVING.store(receiving, Ordering::Relaxed);
-        if can_receive && !receiving {
-            println!("[super-cpu] couldn't make the socket non-blocking, inputs disabled");
-        }
+        let mut receiving = false;
         println!("[super-cpu] streaming to {target}");
         let mut next_heartbeat = Instant::now();
         'conn: loop {
+            if !receiving && probes < PROBE_TRIES && Instant::now() >= next_probe {
+                probes += 1;
+                next_probe = Instant::now() + PROBE_EVERY;
+                if !can_receive {
+                    match receive_works() {
+                        Ok(()) => can_receive = true,
+                        Err(why) => println!(
+                            "[super-cpu] input receive test {probes}/{PROBE_TRIES} failed: {why}"
+                        ),
+                    }
+                }
+                if can_receive {
+                    receiving = setup_receive(&sock);
+                    input::RECEIVING.store(receiving, Ordering::Relaxed);
+                    println!(
+                        "[super-cpu] inputs {}",
+                        if receiving { "on" } else { "off: couldn't make the socket non-blocking" }
+                    );
+                }
+            }
             if receiving && !drain_inputs(&sock, &mut rx, pc_ip, live_frame) {
                 receiving = false;
                 input::RECEIVING.store(false, Ordering::Relaxed);
