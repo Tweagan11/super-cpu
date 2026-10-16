@@ -91,7 +91,7 @@ So with a v3 plugin both ports are filled almost every frame (frame 0 of each ma
 | `mapping.bot_port` | the plugin's `bot_port` |
 | `mapping.player_idx_by_port` | final input mapping `player_idx` logged as `[port 1, port 2]` |
 | `mapping.fim_override` | `fim_player_idx` was set in config.toml |
-| `mapping.verified` | false until port vs controller slot is confirmed on hardware (docs/hooks.md). If it turns out wrong, swap the input columns of logs with the affected mapping |
+| `mapping.verified` | true for the default mapping (player_idx = port - 1, confirmed on hardware 2026-10-16), false with a `fim_player_idx` override or no control status. Logs made before this change say false but used the default mapping, so they are fine |
 | `rows_captured` | rows per port filled from the plugin's capture |
 | `rows_from_acks` | rows per port filled from acks |
 | `ack_capture_mismatches` | rows where an acked input and the captured one disagree. Should be 0; anything else means the frame alignment is off |

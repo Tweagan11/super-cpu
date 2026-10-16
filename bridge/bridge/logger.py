@@ -221,16 +221,17 @@ class MatchLogger:
     # building the file
 
     def _input_mapping(self) -> dict[str, Any]:
-        """Which final input mapping player_idx was logged as which port. Not
-        verified on hardware yet (docs/hooks.md), so it's recorded to allow a
-        fix-up later."""
+        """Which final input mapping player_idx was logged as which port.
+        player_idx = port - 1 was confirmed on hardware 2026-10-16 (it follows
+        the port, not the controller), so the default mapping is verified;
+        a fim_player_idx override isn't."""
         st = self.control
         if st is None:
             return {"source": "none", "bot_port": None, "player_idx_by_port": None,
                     "fim_override": None, "verified": False}
         return {"source": "control_status", "bot_port": st.bot_port,
                 "player_idx_by_port": st.player_idx_by_port(), "fim_override": st.fim_override,
-                "verified": False}
+                "verified": not st.fim_override}
 
     def _header(self, ev: MatchEnded, version: str | None, players: np.ndarray,
                 capture: dict[str, Any]) -> dict[str, Any]:
