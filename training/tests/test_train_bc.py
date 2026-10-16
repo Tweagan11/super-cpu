@@ -59,6 +59,26 @@ class TrainTests(unittest.TestCase):
             out = p.act(h.push(f))
             self.assertIsInstance(out, Inputs)
         self.assertEqual(len(p.prev), p.cfg.prev_inputs)
+        p.configure(delay=3)
+        self.assertEqual(p.delay, 3, "bridge --delay wins without SCPU_DELAY")
+
+        # Sampling (default) vs greedy on the same frames: sampling has to pick
+        # more than one class per head over time, greedy is deterministic.
+        frames = synthetic_frames(120, random.Random(1), 0)
+        def run(temp):
+            os.environ["SCPU_CHECKPOINT"] = s["best"]
+            os.environ["SCPU_TEMPERATURE"] = temp
+            os.environ["SCPU_SEED"] = "3"
+            try:
+                q = POLICIES["bc"]()
+            finally:
+                for k in ("SCPU_CHECKPOINT", "SCPU_TEMPERATURE", "SCPU_SEED"):
+                    del os.environ[k]
+            hh = History()
+            return [q.predict(list(hh.push(f))) for f in frames]
+        greedy, sampled = run("0"), run("1.0")
+        self.assertEqual(greedy, run("0"))
+        self.assertNotEqual(greedy, sampled)
 
     def test_bc_needs_checkpoint(self):
         from training.bc_policy import BCPolicy

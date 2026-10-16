@@ -101,6 +101,7 @@ def run(rule: str = "rule", bot_port: int = 1, n_train: int = 12, n_frames: int 
     log(f"[smoke] trained in {train_s:.1f}s, {summary['params']:,} params")
 
     os.environ["SCPU_CHECKPOINT"] = summary["best"]
+    os.environ["SCPU_TEMPERATURE"] = "0"  # accuracy check: greedy, like the val numbers
     results = {}
     base = majority(rule, bot_port, 4, n_frames, seed + 1000)
     for delay in (0, 2, 4):
