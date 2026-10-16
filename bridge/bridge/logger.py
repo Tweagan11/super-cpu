@@ -427,6 +427,10 @@ class LoadedMatch:
     header: dict[str, Any]
     frames: np.ndarray   # FRAME_DTYPE, shape (n,)
     players: np.ndarray  # PLAYER_DTYPE, shape (n, 2)
+    # Optional bool (n, 2): rows whose input columns were predicted by an
+    # inverse dynamics model (training/idm.py), not recorded. Those rows keep
+    # input_valid = 0. None for ordinary logs.
+    inferred: np.ndarray | None = None
 
     def port(self, slot: int) -> np.ndarray:
         """All rows for one port (1-based)."""
@@ -445,13 +449,14 @@ def load_match(
     with np.load(path, allow_pickle=False) as z:
         header = json.loads(str(z["header"]))
         frames, players = z["frames"], z["players"]
+        inferred = z["inferred"] if "inferred" in z.files else None
     if header.get("schema_version") != SCHEMA_VERSION:
         raise LogRejected(f"{path}: schema v{header.get('schema_version')}, expected v{SCHEMA_VERSION}")
     if expect_version is not None and header.get("game_version") != expect_version:
         raise LogRejected(f"{path}: game version {header.get('game_version')}, expected {expect_version}")
     if expect_mod_hash is not None and header.get("mod_hash") != expect_mod_hash:
         raise LogRejected(f"{path}: mod hash {header.get('mod_hash')}, expected {expect_mod_hash}")
-    return LoadedMatch(header, frames, players)
+    return LoadedMatch(header, frames, players, inferred)
 
 
 def frame_at(m: LoadedMatch, row: int) -> Frame:

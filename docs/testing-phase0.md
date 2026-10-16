@@ -342,6 +342,14 @@ Use a CPU card on port 2 (no controller assigned, level 9) and leave it untouche
 
 Remove the `force_` lines (or set `force_fighter = false`), reboot: no `force` lines, nothing hooked.
 
+## 13. Replays (SSB-26, optional)
+
+Question for the IDM plan (`training/README.md`): does the plugin send state while a Smash replay plays back?
+
+1. `python -m bridge.udp_listen --log` on the PC, game running with the plugin.
+2. Open a saved replay from the game's replay menu and let it play for a few seconds.
+3. Look for fighter lines (and a `match started` line) in the listener. Expect no `in ...` input on them. Note whether they appear, whether the frame numbers climb, and whether a `.npz` gets written at the end. Send me the answer either way.
+
 ## If nothing shows up
 
 | Symptom | Likely cause |

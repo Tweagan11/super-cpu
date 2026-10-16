@@ -245,13 +245,14 @@ def train(
     expect_mod_hash: str | None = None,
     max_seconds: float | None = None,
     prev_dropout: float = 0.5,
+    include_inferred: bool = False,
     log=print,
 ) -> dict[str, Any]:
     """Train and checkpoint. Returns a summary dict (val metrics, paths, ...)."""
     set_seed(seed)
     if device == "cuda" and not torch.cuda.is_available():
         raise SystemExit("--device cuda but torch.cuda.is_available() is False")
-    ds = dataset or build_dataset(files, fcfg, max_delay, expect_version, expect_mod_hash)
+    ds = dataset or build_dataset(files, fcfg, max_delay, expect_version, expect_mod_hash, include_inferred)
     fcfg, max_delay = ds.cfg, ds.max_delay
     tr_m, va_m = split_by_match(len(ds.match_ids), val_frac, seed)
     tr_rows, va_rows = ds.sample_rows(tr_m), ds.sample_rows(va_m)
@@ -331,6 +332,8 @@ def main() -> None:
     ap.add_argument("--max-seconds", type=float, default=None)
     ap.add_argument("--prev-dropout", type=float, default=0.5,
                     help="chance per sample of hiding the bot's own past inputs (fights copycat feedback)")
+    ap.add_argument("--include-inferred", action="store_true",
+                    help="also train on input rows predicted by an IDM (python -m training.idm label); default: recorded inputs only")
     args = ap.parse_args()
     files = find_matches(args.data)
     if not files:
@@ -340,7 +343,8 @@ def main() -> None:
     s = train(files, fcfg=fcfg, mcfg=mcfg, max_delay=args.max_delay, epochs=args.epochs, batch=args.batch,
               lr=args.lr, val_frac=args.val_frac, seed=args.seed, device=args.device, out_dir=args.out,
               expect_version=args.expect_version, expect_mod_hash=args.expect_mod_hash,
-              max_seconds=args.max_seconds, prev_dropout=args.prev_dropout)
+              max_seconds=args.max_seconds, prev_dropout=args.prev_dropout,
+              include_inferred=args.include_inferred)
     print(f"[bc] best checkpoint: {s['best']}")
 
 
