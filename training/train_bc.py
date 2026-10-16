@@ -124,7 +124,8 @@ class BCNet(nn.Module):
     def _embed(self, cat: torch.Tensor) -> torch.Tensor:
         return self.emb(cat + self.cat_offset)  # (B, n_cat, E)
 
-    def forward(self, cont: torch.Tensor, cat: torch.Tensor) -> dict[str, torch.Tensor]:
+    def hidden(self, cont: torch.Tensor, cat: torch.Tensor) -> torch.Tensor:
+        """The trunk's output, before the heads (rl.py hangs a value head here)."""
         e = self._embed(cat)
         B, W = cont.shape[0], self.fcfg.window
         if self.mcfg.kind == "mlp":
@@ -135,6 +136,10 @@ class BCNet(nn.Module):
             _, hn = self.gru(torch.cat([slots, status], dim=2))
             static = torch.cat([cont[:, W * PER_SLOT:], e[:, 2 * W:].flatten(1)], dim=1)
             h = self.trunk(torch.cat([hn[-1], static], dim=1))
+        return h
+
+    def forward(self, cont: torch.Tensor, cat: torch.Tensor) -> dict[str, torch.Tensor]:
+        h = self.hidden(cont, cat)
         return {k: head(h) for k, head in self.heads.items()}
 
 
@@ -196,11 +201,12 @@ def majority_baseline(ds: BCDataset, rows: np.ndarray, delays: np.ndarray, train
     return {f"acc_{h}": float((va[:, i] == np.bincount(tr[:, i]).argmax()).mean()) for i, h in enumerate(HEADS)}
 
 
-def save_checkpoint(path: Path, model: BCNet, extra: dict[str, Any]) -> None:
+def save_checkpoint(path: Path, model: BCNet, extra: dict[str, Any], state: dict | None = None) -> None:
+    """`state` overrides the weights saved (default: model's own)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "format": "super-cpu-bc/1",
-        "model_state": model.state_dict(),
+        "model_state": model.state_dict() if state is None else state,
         "model_config": asdict(model.mcfg),
         "feature_config": model.fcfg.to_dict(),
         "actions": {
