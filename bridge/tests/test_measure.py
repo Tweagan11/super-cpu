@@ -25,10 +25,16 @@ class MeasureTests(unittest.TestCase):
                 m.on_frame(frame(n, bot=f, opp=replace(f, status_kind=DEAD), stage_id=STAGE_ID_BATTLEFIELD), n, 0.0)
                 n += 1
 
+        def walk(x0, x1, y):
+            steps = int(abs(x1 - x0) / 2) + 1
+            for i in range(steps + 1):
+                stand(x0 + (x1 - x0) * i / steps, y, count=1)
+
+        walk(-70.0, 70.0, 0.0)
         stand(-70.0, 0.0)
         stand(70.0, 0.0)
-        stand(-50.0, 27.0)
-        stand(-22.0, 27.0)
+        walk(-50.0, -22.0, 27.0)   # left side platform
+        walk(22.0, 50.0, 27.0)     # right side platform, same height
         stand(0.0, 54.0)
         stand(90.0, -5.0, status_kind=CLIFF)  # hanging on ledge: ignored
         stand(10.0, 80.0, count=3)              # too few frames: ignored
@@ -36,6 +42,8 @@ class MeasureTests(unittest.TestCase):
         text = m.report()
         self.assertIn("main stage: x -70.0 to 70.0, ground y 0.0", text)
         self.assertIn("platform:   x -50.0 to -22.0, y 27.0", text)
+        self.assertIn("platform:   x 22.0 to 50.0, y 27.0", text)
+        self.assertEqual(text.count("platform:"), 3)
         self.assertIn("platform:   x 0.0 to 0.0, y 54.0", text)
         self.assertIn("ledge_x=70.0", text)
         self.assertIn("name='battlefield'", text)
@@ -55,7 +63,7 @@ class TrainingModeTests(unittest.TestCase):
         out: list[str] = []
         m = StageMeasurer(echo=out.append)
         m.on_match_start(MatchStarted(frame(0), 0.0))
-        for n, x in enumerate([-80.0] * 12 + [80.0] * 12):
+        for n, x in enumerate([-80.0 + 2 * i for i in range(81)]):
             f = replace(fighter(), pos_x=x, pos_y=0.0, flags=0, stocks=0)
             m.on_frame(frame(n, bot=f, opp=f), n, 0.0)
         self.assertIsNotNone(m.report())

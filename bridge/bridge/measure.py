@@ -2,7 +2,7 @@
 
     python -m bridge.measure
 
-Start a match on the stage you want to measure, then walk a fighter to both
+Start a match on the stage you want to measure, then walk (not jump) a fighter to both
 edges of the main stage and onto every platform (stand still for a moment on
 each). When the match ends, or when you press Ctrl+C, this prints the ledges,
 ground height and platforms it saw, plus a `StageLayout(...)` you can paste
@@ -34,24 +34,54 @@ OFFSTAGE_STATUSES = frozenset(
 HEIGHT_BUCKET = 2.0
 # A surface needs this many standing frames to count (filters one-frame noise).
 MIN_FRAMES = 10
+# Standing spots more than this far apart (x, game units) at the same height are
+# different surfaces. Running covers ~2 units a frame; the gap between
+# Battlefield's side platforms is far bigger.
+GAP_SPLIT = 10.0
+X_BUCKET = 1.0
+
+
+@dataclass
+class Segment:
+    left: float
+    right: float
+    y: float
+    frames: int
 
 
 @dataclass
 class Surface:
+    """Everything stood on at one height. Battlefield's two side platforms are
+    the same height, so `segments()` splits it wherever x has a gap."""
+
     y_sum: float = 0.0
     frames: int = 0
-    left: float = float("inf")
-    right: float = float("-inf")
+    xs: dict[int, list[float]] = field(default_factory=dict)  # x bucket -> [min, max, count]
 
     def add(self, x: float, y: float) -> None:
         self.y_sum += y
         self.frames += 1
-        self.left = min(self.left, x)
-        self.right = max(self.right, x)
+        b = self.xs.setdefault(int(x // X_BUCKET), [x, x, 0])
+        b[0], b[1], b[2] = min(b[0], x), max(b[1], x), b[2] + 1
 
     @property
     def y(self) -> float:
         return self.y_sum / self.frames
+
+    def segments(self) -> list[Segment]:
+        out: list[Segment] = []
+        cur: list[float] | None = None
+        for k in sorted(self.xs):
+            lo, hi, n = self.xs[k]
+            if cur is not None and lo - cur[1] <= GAP_SPLIT:
+                cur[1], cur[2] = hi, cur[2] + n
+            else:
+                if cur is not None:
+                    out.append(Segment(cur[0], cur[1], self.y, int(cur[2])))
+                cur = [lo, hi, n]
+        if cur is not None:
+            out.append(Segment(cur[0], cur[1], self.y, int(cur[2])))
+        return out
 
 
 @dataclass
@@ -96,7 +126,8 @@ class StageMeasurer:
 
     def report(self) -> str | None:
         found = sorted(
-            (s for s in self.surfaces.values() if s.frames >= MIN_FRAMES), key=lambda s: s.y
+            (seg for s in self.surfaces.values() for seg in s.segments() if seg.frames >= MIN_FRAMES),
+            key=lambda s: (s.y, s.left),
         )
         if not found:
             if not self.seen:
