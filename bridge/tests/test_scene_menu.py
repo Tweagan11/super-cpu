@@ -242,3 +242,19 @@ class EndToEndTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HardwareSceneNameTests(unittest.TestCase):
+    """Scene names seen on hardware, 13.0.4."""
+
+    def test_real_loop(self):
+        from bridge.scenes import CSS, DEFAULT_NAMES, MATCH, RESULTS, STAGE
+        got = [DEFAULT_NAMES.classify(n) for n in
+               ("MeleeScene", "UnlockSequenceScene", "StageSelectScene", "CharaSelectScene")]
+        self.assertEqual(got, [MATCH, RESULTS, STAGE, CSS])
+
+    def test_stage_select_gets_a(self):
+        from bridge import menu_buttons as MB
+        from bridge.rematch import PRESS_FOR
+        from bridge.scenes import STAGE
+        self.assertEqual(PRESS_FOR[STAGE], MB.A)

@@ -4,7 +4,11 @@ Driven by the scene packets (wire.SceneInfo) and the match boundary events
 from matches.MatchWatcher. After a match ends:
 
 - on the results screen, press A until the scene changes
+- on the stage select, press A (picks the stage the cursor is on: last time's)
 - on the CSS, press + (start the match; the picks are kept from last time)
+
+Order on hardware: match -> results (UnlockSequenceScene) -> stage select ->
+CSS -> match.
 
 Every press is one menu press packet (kind 8) via the `press` callback. The
 wait between presses on the same scene visit grows (BACKOFF), and after
@@ -22,7 +26,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import menu_buttons as MB
-from .scenes import CSS, DEFAULT_NAMES, OTHER, RESULTS, SceneNames
+from .scenes import CSS, DEFAULT_NAMES, OTHER, RESULTS, STAGE, SceneNames
 
 SETTLE_S = 1.0       # after entering a scene, wait this long before the first press
 BACKOFF = 1.6        # each retry waits this much longer than the last
@@ -32,7 +36,7 @@ STALE_AFTER_S = 3.5  # scene packets come every 1 s; older than this means we do
 PRESS_HOLD_FRAMES = 1  # one pulse. More frames means more pulses (1 on, 2 off).
 
 # which button each scene wants
-PRESS_FOR = {RESULTS: MB.A, CSS: MB.PLUS}
+PRESS_FOR = {RESULTS: MB.A, STAGE: MB.A, CSS: MB.PLUS}
 
 
 @dataclass
