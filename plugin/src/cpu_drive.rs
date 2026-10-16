@@ -132,23 +132,32 @@ pub fn pick_cpu_index(seen: u64, bot_port: u8, override_idx: Option<i32>) -> Opt
     }
 }
 
-/// Learns the bot's controller_index from the calls of the previous game
-/// frame. Using last frame's complete set (not the calls so far this frame)
-/// matters in CPU vs CPU: the first call of a frame alone looks like "one
-/// CPU". Costs one frame at match start, where the AI keeps control.
+/// Learns the bot's controller_index at match start and then keeps it for
+/// the whole match.
+///
+/// For the first `WARMUP_FRAMES` frames it only watches (the AI keeps control
+/// during the countdown anyway) and collects every index the hook is called
+/// with. Then it picks once (`pick_cpu_index`) and locks. Re-deciding from
+/// each frame's calls went wrong on hardware (2026-10-16): mid-match a frame
+/// with only the other CPU's call ("seen 0x1") made the opponent "the only
+/// CPU", and the PC drove the opponent. A new match (frame counter going
+/// back) starts over.
 pub struct CpuTracker {
     frame: Option<u32>,
-    current: u64,
-    settled: u64,
-    announced: Option<i32>,
+    frames_seen: u32,
+    union: u64,
+    locked: Option<i32>,
+    announced: bool,
 }
+
+pub const WARMUP_FRAMES: u32 = 30;
 
 pub struct Decision {
     /// Write the PC's inputs into this call's controls.
     pub drive: bool,
-    /// Set the first time the bot's index is known or when it changes, for the log.
+    /// Set once per match, when the bot's index is locked, for the log.
     pub announce: Option<i32>,
-    /// Distinct indices seen last frame, for the log.
+    /// Indices seen during warmup, for the log.
     pub seen: u64,
 }
 
@@ -162,7 +171,7 @@ fn bit(idx: i32) -> u64 {
 
 impl CpuTracker {
     pub const fn new() -> Self {
-        CpuTracker { frame: None, current: 0, settled: 0, announced: None }
+        CpuTracker { frame: None, frames_seen: 0, union: 0, locked: None, announced: false }
     }
 
     /// `target` is the frame the written controls are for (live_frame + 1).
@@ -173,21 +182,25 @@ impl CpuTracker {
             }
         }
         if self.frame != Some(target) {
-            if self.current != 0 {
-                self.settled = self.current;
-            }
-            self.current = 0;
             self.frame = Some(target);
+            self.frames_seen += 1;
         }
-        self.current |= bit(idx);
-        let chosen = pick_cpu_index(self.settled, bot_port, override_idx);
-        let announce = if chosen.is_some() && chosen != self.announced {
-            self.announced = chosen;
-            chosen
-        } else {
-            None
+        if override_idx.is_some() {
+            self.locked = override_idx;
+        } else if self.locked.is_none() {
+            self.union |= bit(idx);
+            if self.frames_seen > WARMUP_FRAMES {
+                self.locked = pick_cpu_index(self.union, bot_port, None);
+            }
+        }
+        let announce = match self.locked {
+            Some(i) if !self.announced => {
+                self.announced = true;
+                Some(i)
+            }
+            _ => None,
         };
-        Decision { drive: chosen == Some(idx), announce, seen: self.settled }
+        Decision { drive: self.locked == Some(idx), announce, seen: self.union }
     }
 }
 
@@ -261,41 +274,56 @@ mod tests {
         assert_eq!(pick_cpu_index(1 << 63, 2, None), Some(63));
     }
 
-    #[test]
-    fn tracker_one_cpu() {
-        let mut t = CpuTracker::new();
-        let d = t.observe(10, 1, 2, None);
-        assert!(!d.drive && d.announce.is_none(), "first frame: not known yet");
-        let d = t.observe(11, 1, 2, None);
-        assert!(d.drive);
-        assert_eq!(d.announce, Some(1));
-        assert!(t.observe(11, 1, 2, None).announce.is_none(), "announced once");
-        assert!(t.observe(12, 1, 2, None).drive);
+    /// Feeds `frames` frames starting at `start`, each with calls for `idxs`.
+    fn feed(t: &mut CpuTracker, start: u32, frames: u32, idxs: &[i32]) -> Vec<(i32, Decision)> {
+        let mut out = Vec::new();
+        for f in start..start + frames {
+            for &i in idxs {
+                out.push((i, t.observe(f, i, 2, None)));
+            }
+        }
+        out
     }
 
     #[test]
-    fn tracker_two_cpus_waits_for_full_frame() {
+    fn tracker_one_cpu() {
         let mut t = CpuTracker::new();
-        t.observe(10, 0, 2, None);
-        t.observe(10, 1, 2, None);
-        // frame 11: the first call (idx 0) must not be mistaken for "the only CPU"
-        let a = t.observe(11, 0, 2, None);
-        let b = t.observe(11, 1, 2, None);
+        let warm = feed(&mut t, 10, WARMUP_FRAMES, &[1]);
+        assert!(warm.iter().all(|(_, d)| !d.drive), "warmup: only watching");
+        let d = t.observe(10 + WARMUP_FRAMES, 1, 2, None);
+        assert!(d.drive);
+        assert_eq!(d.announce, Some(1));
+        assert!(t.observe(11 + WARMUP_FRAMES, 1, 2, None).announce.is_none(), "announced once");
+    }
+
+    #[test]
+    fn tracker_two_cpus_picks_port_rank() {
+        let mut t = CpuTracker::new();
+        feed(&mut t, 0, WARMUP_FRAMES, &[0, 1]);
+        let a = t.observe(WARMUP_FRAMES, 0, 2, None);
+        let b = t.observe(WARMUP_FRAMES, 1, 2, None);
         assert!(!a.drive && b.drive);
-        assert_eq!(a.announce, Some(1), "known from the first call of the frame");
-        assert!(b.announce.is_none());
-        assert!(!t.observe(12, 0, 2, None).drive);
-        assert!(t.observe(12, 1, 2, None).drive);
+        assert_eq!(a.announce, Some(1));
+    }
+
+    #[test]
+    fn tracker_stays_locked_when_a_frame_has_one_call() {
+        // the hardware bug: a frame with only the opponent's call
+        let mut t = CpuTracker::new();
+        feed(&mut t, 0, WARMUP_FRAMES + 5, &[0, 1]);
+        let later = feed(&mut t, 100, 50, &[0]);
+        assert!(later.iter().all(|(_, d)| !d.drive), "never drives the opponent");
+        assert!(t.observe(200, 1, 2, None).drive, "still the bot");
     }
 
     #[test]
     fn tracker_resets_on_new_match_and_override() {
         let mut t = CpuTracker::new();
-        t.observe(500, 2, 2, None);
-        assert!(t.observe(501, 2, 2, None).drive);
+        feed(&mut t, 500, WARMUP_FRAMES + 1, &[2]);
+        assert!(t.observe(600, 2, 2, None).drive);
         // new match: frame counter restarts, now the CPU has another index
-        t.observe(1, 3, 2, None);
-        let d = t.observe(2, 3, 2, None);
+        feed(&mut t, 1, WARMUP_FRAMES, &[3]);
+        let d = t.observe(1 + WARMUP_FRAMES, 3, 2, None);
         assert!(d.drive);
         assert_eq!(d.announce, Some(3));
         let mut o = CpuTracker::new();

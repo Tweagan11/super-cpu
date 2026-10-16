@@ -246,7 +246,8 @@ fn check_drive_agreement(port: usize, frame: u32, cm: Inputs) {
     } else {
         (AGREE.load(Ordering::Relaxed), DISAGREE.fetch_add(1, Ordering::Relaxed) + 1)
     };
-    if !ok && d <= 5 {
+    // first 5 since boot, then one example every 100 disagreements
+    if !ok && (d <= 5 || d % 100 == 0) {
         crate::log::log(format!("drive_cpu: frame {frame} wrote {applied:?} but the control module reads {cm:?}"));
     }
     if (a + d) % 300 == 0 {
