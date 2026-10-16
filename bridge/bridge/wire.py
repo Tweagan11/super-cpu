@@ -20,6 +20,8 @@ KIND_HEARTBEAT = 3
 KIND_ACK = 4
 KIND_CONTROL_STATUS = 5
 KIND_LOG = 6  # plugin log line (plugin/src/log.rs)
+KIND_SCENE = 7  # current scene name (plugin/src/scene.rs)
+KIND_MENU = 8  # PC to Switch: press menu buttons (plugin/src/menu.rs)
 
 HEADER_FMT = "<4sHHI"  # magic, proto_version, kind, seq
 HEADER_LEN = struct.calcsize(HEADER_FMT)  # 12
@@ -299,3 +301,72 @@ class LogDedup:
             return False
         self.seen.add(line.id)
         return True
+
+
+# --- Scene (kind 7, Switch to PC, on change and every second) ----------------
+# changes, flags, menu_applied, menu_last_seq, scene name (NUL padded, 32 bytes)
+SCENE_FMT = "<IIII32s"
+SCENE_LEN = HEADER_LEN + struct.calcsize(SCENE_FMT)  # 60
+SCENE_NAME_LEN = 32
+
+SCENE_FLAG_SCENE_HOOK = 1  # the scene-change hook is installed
+SCENE_FLAG_MENU_HOOK = 2   # auto_menu is on and the controller hook is installed
+NO_MENU_SEQ = 0xFFFFFFFF   # menu_last_seq before any press was applied
+
+
+@dataclass(frozen=True)
+class SceneInfo:
+    header: Header
+    changes: int  # scene changes since the plugin booted
+    flags: int
+    menu_applied: int  # frames with a menu press written since boot
+    menu_last_seq: int  # seq of the last menu press that was applied
+    name: str
+
+    @property
+    def menu_hook(self) -> bool:
+        return bool(self.flags & SCENE_FLAG_MENU_HOOK)
+
+
+def pack_scene(seq: int, name: str, changes: int, flags: int = SCENE_FLAG_SCENE_HOOK,
+               menu_applied: int = 0, menu_last_seq: int = NO_MENU_SEQ) -> bytes:
+    return pack_header(KIND_SCENE, seq) + struct.pack(
+        SCENE_FMT, changes & 0xFFFFFFFF, flags & 0xFFFFFFFF, menu_applied & 0xFFFFFFFF,
+        menu_last_seq & 0xFFFFFFFF, name.encode()[:SCENE_NAME_LEN],
+    )
+
+
+def unpack_scene(buf: bytes) -> SceneInfo:
+    h = unpack_header(buf)
+    if h.kind != KIND_SCENE or len(buf) < SCENE_LEN:
+        raise BadPacket("not a scene packet")
+    changes, flags, applied, last_seq, name = struct.unpack_from(SCENE_FMT, buf, HEADER_LEN)
+    return SceneInfo(h, changes, flags, applied, last_seq, name.split(b"\0", 1)[0].decode(errors="replace"))
+
+
+# --- Menu press (kind 8, PC to Switch) ---------------------------------------
+# press seq, button mask (Controller bits, see menu_buttons.py), hold frames, 2 reserved bytes
+MENU_FMT = "<IIHH"
+MENU_LEN = HEADER_LEN + struct.calcsize(MENU_FMT)  # 24
+MENU_MAX_HOLD = 120
+
+
+@dataclass(frozen=True)
+class MenuPress:
+    header: Header
+    press_seq: int  # the press's own counter; the plugin ignores one that isn't newer
+    mask: int
+    hold_frames: int
+
+
+def pack_menu(seq: int, press_seq: int, mask: int, hold_frames: int = 1) -> bytes:
+    hold = max(1, min(MENU_MAX_HOLD, int(hold_frames)))
+    return pack_header(KIND_MENU, seq) + struct.pack(MENU_FMT, press_seq & 0xFFFFFFFF, mask & 0xFFFFFFFF, hold, 0)
+
+
+def unpack_menu(buf: bytes) -> MenuPress:
+    h = unpack_header(buf)
+    if h.kind != KIND_MENU or len(buf) < MENU_LEN:
+        raise BadPacket("not a menu press packet")
+    press_seq, mask, hold, _ = struct.unpack_from(MENU_FMT, buf, HEADER_LEN)
+    return MenuPress(h, press_seq, mask, hold)

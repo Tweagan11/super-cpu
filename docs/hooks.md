@@ -55,6 +55,30 @@ The probe is there so that switching later is cheap: one hardware session tells 
 
 `state.rs` numbers frames by counting fighter-hook wraparounds. The input hook asks `state::live_frame()` for the last finished frame and looks up the input for `live_frame + 1`. That's right whether the game maps inputs before or after the fighters update within a frame: either way, `live_frame + 1` is the next frame whose fighter update reads what we write. If no fighter frame ran in the last 250 ms (menus, pause, results), `live_frame()` is None and the hook leaves the input alone.
 
+## 5. Scene reporting and menu presses (SSB-25)
+
+Two more hooks, both fixed `.text` offsets for 13.0.4 from `docs/css-research.md` (HDR-1304 and ARCropolis). They are only installed when the running game version is 13.0.4, and are not byte-pattern searched, so a different build gets neither. Code: `plugin/src/menu_hook.rs`, logic in `scene.rs` and `menu.rs`.
+
+| Hook | Offset | What it does |
+| --- | --- | --- |
+| Scene change | `0x3726120` | Read only. Reads the target scene's name (NUL terminated string at `target + 8`, at most 32 bytes), keeps it for the scene packet (kind 7) and logs `scene #n: "old" -> "new"` through `log::log`. Always installed |
+| Controller update | `0x36650c0` (HDR `process_inputs_handheld`) | After the original ran, ORs the current menu press into the bot's `Controller` (`current_buttons` and `just_down`). Installed only with `auto_menu = true` |
+
+The press is applied only when all of these hold: the scene is known and not the match (name contains "melee" and not "result", `scene::is_match_scene`), no fighter frame ran in the last 250 ms (`state::live_frame()`), and the controller's `npad_number` is `bot_port - 1`. The first eight distinct (style, npad, controller_id) combos the hook sees are logged as `controller update: style S npad N id I`.
+
+`is_result_mode` is not read: the PC tells results apart by scene name. Reading it would mean calling a game function from another thread or adding game-thread work, for a signal the scene already gives. Add it if E1 shows the results screen has no scene of its own.
+
+Risks, in the order I'd expect them to bite:
+
+- **The prototype of `0x36650c0` is unverified.** The doc names the offset and "the controller update", not the signature. The hook takes `(controller, a1, a2, a3)` and forwards all four and the return value, so extra arguments survive, but if the first argument isn't the `Controller` the plugin reads garbage and could crash on the first controller update. It's behind `auto_menu`, off by default. If a boot with `auto_menu = true` crashes, that's the first suspect.
+- **One function may not cover every controller style.** HDR calls it the handheld path. A Pro Controller or GC adapter may go through other update functions, and then presses never land. Step 11c of `testing-phase0.md` checks with the logged style list.
+- **`npad_number` vs port.** The bot's port is matched on `Controller::npad_number == bot_port - 1`. That is the controller number, which is the port only if controllers were connected in order. 9c showed the match input's `player_idx` is the port; this is a different struct and unchecked. The log line above shows the real values.
+- **`Controller` layout.** Copied from the Training Modpack (size checked at compile time, 0xd0). A wrong offset writes into the wrong field.
+- **Scene hook signature.** Same story: forwarded untouched, only the second argument is read, as a string pointer with a null check. The 8 byte header before the name is assumed (HDR and ARCropolis disagree on its contents, not its size).
+- **Wrong scene names.** The match and results names are guesses (E1). A wrong match guess could allow a press during a match (the fighter-frame check is the backstop) or block presses on results (`bridge.run` logs every scene it sees and says when it won't press).
+- **Other mods.** ARCropolis and HDR hook the same functions. Skyline hooks chain, but the order depends on load order.
+- **Licenses.** HDR is AGPL and ARCropolis GPL: offsets and struct layouts only, no code copied.
+
 ## Open questions only hardware can answer
 
 | Question | Why it matters | How to check |

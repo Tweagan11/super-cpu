@@ -16,6 +16,8 @@
 //! `fim_player_idx` overrides which final-input-mapping player index counts
 //! as the bot; leave it out unless docs/hooks.md says you need it.
 //! `cpu_probe = 0` turns off the read-only CPU controls probe.
+//! `auto_menu = true` lets the PC press menu buttons on the bot's controller
+//! outside matches (SSB-25, off by default).
 
 pub const CONFIG_DIR: &str = "sd:/ultimate/super-cpu";
 pub const CONFIG_PATH: &str = "sd:/ultimate/super-cpu/config.toml";
@@ -31,11 +33,13 @@ pub struct Config {
     pub fim_player_idx: Option<i32>,
     /// Install the read-only set_cpu_controls probe (docs/hooks.md).
     pub cpu_probe: bool,
+    /// Install the menu press hook and apply kind 8 packets (docs/hooks.md).
+    pub auto_menu: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { pc_ip: "192.168.1.50".into(), udp_port: 4243, bot_port: 2, fim_player_idx: None, cpu_probe: true }
+        Self { pc_ip: "192.168.1.50".into(), udp_port: 4243, bot_port: 2, fim_player_idx: None, cpu_probe: true, auto_menu: false }
     }
 }
 
@@ -84,6 +88,7 @@ fn parse_into(text: &str, cfg: &mut Config) {
                 Ok(p) if (1..=8).contains(&p) => cfg.bot_port = p,
                 _ => crate::log::log(format!("bot_port must be 1 to 8, got {value:?}, keeping {}", cfg.bot_port)),
             },
+            "auto_menu" => cfg.auto_menu = matches!(value, "1" | "true" | "on"),
             "cpu_probe" => cfg.cpu_probe = !matches!(value, "0" | "false" | "off"),
             "fim_player_idx" => {
                 if let Ok(i) = value.parse() {
@@ -119,12 +124,15 @@ mod tests {
         assert!(c.cpu_probe);
         parse_into("cpu_probe = 0\n", &mut c);
         assert!(!c.cpu_probe);
+        assert!(!c.auto_menu);
+        parse_into("auto_menu = true\n", &mut c);
+        assert!(c.auto_menu);
     }
 
     #[test]
     fn template_parses_back() {
         let d = Config::default();
-        let mut c = Config { pc_ip: String::new(), udp_port: 0, bot_port: 1, fim_player_idx: None, cpu_probe: false };
+        let mut c = Config { pc_ip: String::new(), udp_port: 0, bot_port: 1, fim_player_idx: None, cpu_probe: false, auto_menu: false };
         parse_into(&template(&d), &mut c);
         assert_eq!((c.pc_ip, c.udp_port, c.bot_port), (d.pc_ip, d.udp_port, d.bot_port));
     }

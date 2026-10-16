@@ -19,7 +19,7 @@ from .matches import FrameTracker, MatchEnded, MatchStarted, MatchWatcher  # noq
 from .stages import stage_layout, stage_name
 from .statuses import status_name
 from .protocol import Fighter, Frame, Inputs
-from .wire import KIND_CONTROL_STATUS, BadPacket, Heartbeat, LogDedup, LogLine, bits_list, unpack_control_status
+from .wire import KIND_CONTROL_STATUS, BadPacket, Heartbeat, LogDedup, LogLine, SceneInfo, bits_list, unpack_control_status
 
 
 class SeqTracker:
@@ -120,6 +120,8 @@ def listen(
     logs = LogDedup()
     sender = None
     last_uptime = 0
+    last_scene: str | None = None
+    last_scene_change = -1
     started = last_report = last_live = time.monotonic()
     latest = None
     health = None
@@ -162,6 +164,11 @@ def listen(
                     )
             elif isinstance(msg, Frame):
                 latest = msg
+            elif isinstance(msg, SceneInfo):
+                if msg.changes != last_scene_change or msg.name != last_scene:
+                    last_scene_change, last_scene = msg.changes, msg.name
+                    print(f"[listen] scene: {msg.name!r} (change #{msg.changes}, "
+                          f"menu hook {'on' if msg.menu_hook else 'off'}, menu pulses applied {msg.menu_applied})")
             elif isinstance(msg, LogLine):
                 if logs.new(msg):
                     print(f"[switch] {msg.text}")

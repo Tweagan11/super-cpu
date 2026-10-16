@@ -19,6 +19,15 @@ status line every few seconds.
 `--bot-port` must match `bot_port` in the plugin's config.toml. The plugin
 reports its port with every heartbeat and this warns if they differ.
 
+`--auto-rematch` (SSB-25) keeps matches going unattended: once a match has
+ended and the plugin reports the results scene it presses A (menu press
+packets, kind 8) until the scene changes, then + on the CSS to start the next
+one, with a growing wait between presses and a cap per scene (rematch.py).
+It needs `auto_menu = true` in the plugin's config.toml. The scene names are
+guesses until hardware experiment E1: this logs every scene it sees, and
+`--css-scene` / `--results-scene` / `--match-scene` (substrings, repeatable)
+override them.
+
 Only one program can own UDP 4243 at a time, so stop udp_listen first.
 """
 from __future__ import annotations
@@ -35,12 +44,15 @@ from typing import Callable, Sequence
 from .matches import MatchStarted, MatchWatcher
 from .policy import POLICIES, History, Policy
 from .protocol import Frame, Inputs
+from .rematch import Rematch
+from .scenes import DEFAULT_NAMES, SceneNames
 from .udp_listen import SeqTracker
 from .wire import (
     KIND_ACK,
     KIND_CONTROL_STATUS,
     KIND_HEARTBEAT,
     KIND_LOG,
+    KIND_SCENE,
     KIND_STATE,
     Ack,
     BadPacket,
@@ -48,6 +60,7 @@ from .wire import (
     LogDedup,
     bits_list,
     pack_input,
+    pack_menu,
     unpack_ack,
     unpack_control_status,
     unpack_header,
@@ -158,6 +171,8 @@ class Bridge:
         log: Callable[[str], None] = print,
         observers: Sequence[object] = (),
         logger=None,
+        auto_rematch: bool = False,
+        scene_names: SceneNames = DEFAULT_NAMES,
     ) -> None:
         if not 0 <= delay <= MAX_DELAY:
             raise ValueError(f"delay must be 0 to {MAX_DELAY} frames")
@@ -179,6 +194,12 @@ class Bridge:
         hooks: list[object] = [_MatchHooks(self)]
         if self.recorder is not None:
             hooks.append(self.recorder)
+        self.rematch = Rematch(self.send_menu, log, scene_names) if auto_rematch else None
+        if self.rematch is not None:
+            hooks.append(self.rematch)
+        self.menu_seq = 0
+        self.scene_name: str | None = None
+        self._warned_menu = False
         self.watcher = MatchWatcher([*hooks, *observers], bot_port=bot_port)
         self.frames = self.watcher.boundary.frames
         self.acks = AckStats()
@@ -209,7 +230,10 @@ class Bridge:
         """Handle at most one packet. Returns its kind, or None on timeout/bad.
         Also checks for the end of a match, so call it even when idle."""
         kind = self._poll(timeout)
-        self.watcher.poll(time.monotonic())
+        now = time.monotonic()
+        self.watcher.poll(now)
+        if self.rematch is not None:
+            self.rematch.tick(now)
         return kind
 
     def _poll(self, timeout: float) -> int | None:
@@ -252,6 +276,9 @@ class Bridge:
                 _, line = self.watcher.packet(buf, time.monotonic())
                 if self.logs.new(line):
                     self.log(f"[switch] {line.text}")
+            elif header.kind == KIND_SCENE:
+                _, sc = self.watcher.packet(buf, time.monotonic())
+                self._on_scene(sc)
             elif header.kind == KIND_HEARTBEAT:
                 _, hb = self.watcher.packet(buf, time.monotonic())
                 if self.last_uptime and hb.uptime_ms < self.last_uptime:
@@ -287,6 +314,24 @@ class Bridge:
         self.inputs_sent += 1
         if self.sent_frames is not None:
             self.sent_frames.append(frame.frame)
+
+    def send_menu(self, mask: int, hold_frames: int = 1) -> None:
+        """One menu press (kind 8) to the Switch. Needs auto_menu on in the plugin."""
+        if self.switch is None:
+            return
+        packet = pack_menu(self.out_seq, self.menu_seq, mask, hold_frames)
+        self.sock.sendto(packet, self.switch)
+        self.out_seq = (self.out_seq + 1) & 0xFFFFFFFF
+        self.menu_seq = (self.menu_seq + 1) & 0xFFFFFFFF
+
+    def _on_scene(self, sc) -> None:
+        if sc.name != self.scene_name:
+            self.scene_name = sc.name
+            self.log(f"[run] scene: {sc.name!r} (change #{sc.changes}, menu pulses applied {sc.menu_applied})")
+        if self.rematch is not None and not sc.menu_hook and not self._warned_menu:
+            self._warned_menu = True
+            self.log("[run] WARNING: --auto-rematch is on but the plugin's menu hook is off. "
+                     "Set auto_menu = true in config.toml, or the presses are ignored.")
 
     def _on_status(self, s: ControlStatus) -> None:
         first = self.status is None
@@ -340,7 +385,8 @@ class Bridge:
 
 def run(port: int, policy: Policy, delay: int, bot_port: int, expect_version: str | None,
         report_every: float = 5.0, seconds: float | None = None, logger=None, session=None,
-        bind: str = "0.0.0.0", idle_timeout: float | None = None) -> Bridge:
+        bind: str = "0.0.0.0", idle_timeout: float | None = None,
+        auto_rematch: bool = False, scene_names: SceneNames = DEFAULT_NAMES) -> Bridge:
     """`logger` (a MatchLogger) logs every match; `session` (an EvalSession)
     scores them and stops the loop once it has all its games. With a session,
     its own logger is the one used (pass write_logs to it for files)."""
@@ -349,12 +395,14 @@ def run(port: int, policy: Policy, delay: int, bot_port: int, expect_version: st
         observers = session.observers()
     else:
         observers = [logger] if logger is not None else []
-    b = Bridge(port, policy, delay, bot_port, expect_version, bind=bind, observers=observers, logger=logger)
+    b = Bridge(port, policy, delay, bot_port, expect_version, bind=bind, observers=observers, logger=logger,
+               auto_rematch=auto_rematch, scene_names=scene_names)
     print(
         f"[run] {type(policy).__name__} on port {bot_port}, delay {delay} frames, "
         f"waiting for the Switch on UDP :{b.port}"
         + (f", logging to {logger.out_dir}" if logger is not None and logger.write else "")
         + (f", eval {session.games} games" if session is not None else "")
+        + (", auto rematch" if auto_rematch else "")
     )
     start = last_report = last_packet = time.monotonic()
     last_frames = 0
@@ -413,7 +461,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--min-seconds", type=float, default=10.0, help="eval: ignore matches shorter than this")
     ap.add_argument("--results", type=Path, default=None, help="eval: results CSV (default eval/results.csv)")
     ap.add_argument("--data-dir", type=Path, default=None, help="eval: per-match CSV dir (default <repo>/data)")
+    ap.add_argument("--auto-rematch", action="store_true",
+                    help="after a match, press A through results and + on the CSS (needs auto_menu = true on the plugin)")
+    ap.add_argument("--css-scene", action="append", metavar="TEXT", help="scene name substring that means the CSS (repeatable)")
+    ap.add_argument("--results-scene", action="append", metavar="TEXT", help="scene name substring for the results screen")
+    ap.add_argument("--match-scene", action="append", metavar="TEXT", help="scene name substring for the match")
     args = ap.parse_args(argv)
+    names = SceneNames(
+        css=tuple(args.css_scene or DEFAULT_NAMES.css),
+        results=tuple(args.results_scene or DEFAULT_NAMES.results),
+        match=tuple(args.match_scene or DEFAULT_NAMES.match),
+    )
     from .stages import layout_by_name
 
     layout_by_name(args.stage)  # fail early on a typo
@@ -443,7 +501,8 @@ def main(argv: list[str] | None = None) -> int:
             ruleset={**DEFAULT_RULESET, "stocks": args.stocks},
         )
     run(args.port, POLICIES[args.policy](), args.delay, args.bot_port, args.expect_version,
-        args.report_every, args.seconds, logger=logger, session=session, idle_timeout=args.idle_timeout)
+        args.report_every, args.seconds, logger=logger, session=session, idle_timeout=args.idle_timeout,
+        auto_rematch=args.auto_rematch, scene_names=names)
     return 0 if session is None or session.done else 1
 
 

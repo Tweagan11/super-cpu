@@ -12,6 +12,9 @@
 //! - SSB-13: captures every port's final mapped inputs and sends them with
 //!   the state packet (protocol v3), so human play can be logged for
 //!   imitation learning
+//! - SSB-25: reports the current scene (packet kind 7) and, with
+//!   `auto_menu = true`, presses menu buttons for the PC (kind 8)
+//!   (`scene.rs`, `menu.rs`, `menu_hook.rs`)
 //! - SSB-10 (game version half): no state packets on a mismatched build
 //!   (`version.rs`)
 //!
@@ -24,8 +27,11 @@ mod control;
 mod frame;
 mod input;
 mod log;
+mod menu;
+mod menu_hook;
 mod net;
 mod offsets;
+mod scene;
 mod state;
 mod version;
 
@@ -60,6 +66,7 @@ pub fn main() {
     input::init(cfg.bot_port, cfg.bot_player_idx(), cfg.fim_player_idx.is_some(), ack_tx);
     frame::install();
     control::install(cfg.cpu_probe);
+    menu_hook::install(cfg.bot_port as u32 - 1, cfg.auto_menu);
 
     // Networking never runs on the game thread.
     std::thread::spawn(move || net::run(cfg, rx, ack_rx, health));

@@ -27,6 +27,14 @@ the PC) while a session is on, and the other port gets plausible "human"
 inputs from `human_inputs()`. With no session the bot's port gets the same
 kind of synthesized controller input, not driven.
 
+SSB-25: it also sends scene packets (kind 7) and takes menu presses (kind 8).
+Scenes go CSS -> match -> results -> CSS. With `menus=True` (`--menus`) the
+loop waits for the bridge like the real game would: a match ends on the
+results scene until an A press arrives, then the CSS waits for + before the
+next match (`bridge.run --auto-rematch`). `menu_ignore=N` makes the results
+screen swallow the first N presses, to exercise the retry/backoff. Without
+`menus` the scenes still change on the timer and presses are only recorded.
+
 `--version 13.0.3` pretends the Switch runs the wrong game build: like the
 real plugin, it then sends heartbeats only.
 """
@@ -41,7 +49,9 @@ import time
 from dataclasses import dataclass, replace
 
 from . import buttons as B
+from . import menu_buttons as MB
 from .protocol import Fighter, Frame, Inputs
+from .scenes import FAKE_CSS, FAKE_MATCH, FAKE_RESULTS
 from .stages import STAGE_ID_BATTLEFIELD, STAGE_ID_UNKNOWN
 from .statuses import STATUS_NAMES
 from .wire import (
@@ -49,6 +59,9 @@ from .wire import (
     FLAG_RECEIVING,
     FLAG_SESSION_ACTIVE,
     KIND_INPUT,
+    KIND_MENU,
+    SCENE_FLAG_MENU_HOOK,
+    SCENE_FLAG_SCENE_HOOK,
     BadPacket,
     ControlStatus,
     Header,
@@ -56,9 +69,11 @@ from .wire import (
     pack_control_status,
     pack_heartbeat,
     pack_log,
+    pack_scene,
     pack_state,
     unpack_header,
     unpack_input,
+    unpack_menu,
 )
 
 ROBOT = 0x2D
@@ -164,6 +179,10 @@ class FakeInputSide:
         self.last_fresh: Inputs | None = None
         self.since_fresh = 0
         self.c = Counters()
+        self.scenes: list[str] = []  # scenes visited, in order (SSB-25)
+        self.menu_presses: list[tuple[str, int]] = []  # (scene, button mask) per press received
+        self.menu_applied = 0
+        self.menu_last_seq = 0xFFFFFFFF
 
     def session_active(self, now: float) -> bool:
         return self.last_rx is not None and now - self.last_rx < SESSION_TIMEOUT
@@ -241,7 +260,7 @@ class FakeInputSide:
 def run(host: str, port: int, drop: float, version: str, match: bool, seconds: float | None,
         bot_port: int = 2, latency_ms: float = 0.0, input_drop: float = 0.0, quiet: bool = False,
         matches: int | None = None, match_seconds: float = 6.0, gap: float = 2.5,
-        winners: tuple[int, ...] = (2, 2, 1)) -> FakeInputSide:
+        winners: tuple[int, ...] = (2, 2, 1), menus: bool = False, menu_ignore: int = 0) -> FakeInputSide:
     """`matches=N` plays N scripted matches (stock losses, a winner, gaps for
     the results screen) back to back, then stops; otherwise one endless
     drifting match. Inputs and acks work the same either way."""
@@ -267,6 +286,48 @@ def run(host: str, port: int, drop: float, version: str, match: bool, seconds: f
     script: list[Frame] | None = None  # current scripted match, None = endless drift
     match_no = 0
     gap_until: float | None = None
+    playing = True  # a match is running (False on the results screen / CSS)
+    scene_name = FAKE_MATCH if match else FAKE_CSS
+    scene_changes = 1
+    scene_sent = 0
+    next_scene = start
+    side.scenes.append(scene_name)
+    awaiting: str | None = None  # menus mode: "results" or "start"
+    ignored = 0
+    end_at: float | None = None
+
+    def set_scene(name: str) -> None:
+        nonlocal scene_name, scene_changes
+        scene_name = name
+        scene_changes += 1
+        side.scenes.append(name)
+        log(f"[fake] scene {name}")
+
+    def on_menu(mask: int, press_seq: int, now: float) -> None:
+        nonlocal awaiting, ignored, match_no, script, frame, playing, next_tick, end_at
+        side.menu_presses.append((scene_name, mask))
+        side.menu_applied += 1
+        side.menu_last_seq = press_seq
+        if not menus:
+            return
+        if awaiting == "results" and mask & MB.A:
+            if ignored < menu_ignore:
+                ignored += 1
+                return
+            match_no += 1
+            set_scene(FAKE_CSS)
+            if match_no >= (matches or 0):
+                awaiting = None
+                end_at = now + 1.5
+            else:
+                awaiting = "start"
+        elif awaiting == "start" and mask & MB.PLUS:
+            script = next_script()
+            frame = 0
+            playing = True
+            next_tick = now
+            awaiting = None
+            set_scene(FAKE_MATCH)
 
     def next_script() -> list[Frame] | None:
         winner = winners[match_no % len(winners)]
@@ -305,7 +366,12 @@ def run(host: str, port: int, drop: float, version: str, match: bool, seconds: f
         while in_flight and in_flight[0][0] <= now:
             _, _, buf = heapq.heappop(in_flight)
             try:
-                if unpack_header(buf).kind != KIND_INPUT:
+                kind = unpack_header(buf).kind
+                if kind == KIND_MENU:
+                    m = unpack_menu(buf)
+                    on_menu(m.mask, m.press_seq, now)
+                    continue
+                if kind != KIND_INPUT:
                     continue
             except BadPacket:
                 side.c.rejected += 1
@@ -328,6 +394,10 @@ def run(host: str, port: int, drop: float, version: str, match: bool, seconds: f
         while seconds is None or time.monotonic() - start < seconds:
             now = time.monotonic()
             pump(now)
+            if end_at is not None and now >= end_at:
+                break
+            if gap_until is not None and scene_name == FAKE_RESULTS and now >= gap_until - 0.8:
+                set_scene(FAKE_CSS)
             if gap_until is not None and now >= gap_until:
                 gap_until = None
                 match_no += 1
@@ -336,7 +406,9 @@ def run(host: str, port: int, drop: float, version: str, match: bool, seconds: f
                 script = next_script()
                 frame = 0
                 next_tick = now
-            if match and gap_until is None and now >= next_tick:
+                playing = True
+                set_scene(FAKE_MATCH)
+            if match and playing and now >= next_tick:
                 next_tick += FRAME_TIME
                 if next_tick < now - 0.1:
                     next_tick = now  # fell way behind (debugger, sleep); don't burst
@@ -379,7 +451,18 @@ def run(host: str, port: int, drop: float, version: str, match: bool, seconds: f
                     # results screen: last state goes out, then heartbeats only
                     send(pack_state(seq, pending_state))
                     pending_state = None
-                    gap_until = now + gap
+                    playing = False
+                    set_scene(FAKE_RESULTS)
+                    if menus:
+                        awaiting, ignored = "results", 0
+                    else:
+                        gap_until = now + gap
+            if scene_changes != scene_sent or now >= next_scene:
+                scene_sent = scene_changes
+                next_scene = now + 1.0
+                send(pack_scene(seq, scene_name, scene_changes,
+                                SCENE_FLAG_SCENE_HOOK | (SCENE_FLAG_MENU_HOOK if menus else 0),
+                                side.menu_applied, side.menu_last_seq))
             if now >= next_hb:
                 next_hb = now + 0.5
                 send(pack_heartbeat(seq, int((now - start) * 1000), version, True, 2 * frame, frame))
@@ -450,12 +533,16 @@ def main() -> None:
     ap.add_argument("--matches", type=int, default=None, help="play N short scripted matches, then stop")
     ap.add_argument("--match-seconds", type=float, default=6.0)
     ap.add_argument("--gap", type=float, default=2.5, help="seconds between matches (must beat the 1.5 s end timeout)")
+    ap.add_argument("--menus", action="store_true",
+                    help="wait for menu presses between matches (A on results, + on the CSS), for bridge.run --auto-rematch")
+    ap.add_argument("--menu-ignore", type=int, default=0, help="with --menus: the results screen ignores this many A presses")
     ap.add_argument("--winners", default="2,2,1", help="winning port per match, cycled, e.g. 2,2,1")
     args = ap.parse_args()
     winners = tuple(int(w) for w in args.winners.split(","))
     run(args.host, args.port, args.drop, args.version, not args.no_match, args.seconds,
         args.bot_port, args.latency_ms, args.input_drop, matches=args.matches,
-        match_seconds=args.match_seconds, gap=args.gap, winners=winners)
+        match_seconds=args.match_seconds, gap=args.gap, winners=winners,
+        menus=args.menus, menu_ignore=args.menu_ignore)
 
 
 if __name__ == "__main__":
