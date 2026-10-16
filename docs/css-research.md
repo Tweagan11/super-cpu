@@ -25,7 +25,7 @@ Offsets below are `.text` offsets, the number you give `#[skyline::hook(offset =
 - **Scene detection is solved.** Two independent sources hook the same scene-push function at `0x3726120` on 13.0.4, and both get the scene name as a string (`"CharaSelectScene"`, `"StageSelectScene"`, ...). For the results screen, add `FighterManager::is_result_mode` (symbol based).
 - **Auto-select can skip cursor driving entirely.** HDR forces a fighter and costume onto a player who picked Random. It writes a `ui_chara` hash and a costume byte into the per-player "decided fighter" record at match start (`0x1a0d540`). If the bot's card sits on Random, the plugin can turn it into `ui_chara_robot` with costume 5, and the roster layout stops mattering.
 - **Menus don't read the input the bot uses in matches.** Matches use `MappedInputs` (after the button config). Menus read the raw `Controller` struct: `current_buttons` and `just_down`. UTM and HDR both press menu buttons by writing that struct. So driving menus needs a second, controller-level hook.
-- **Costume index:** `FIGHTER_INSTANCE_WORK_ID_INT_COLOR` is the 0-based slot, the same number as the CSS color index (c00 = 0). Community lists put green R.O.B. 6th, so **index 5 (c05)**. Medium confidence. The log line the plugin already prints settles it.
+- **Costume index:** `FIGHTER_INSTANCE_WORK_ID_INT_COLOR` is the 0-based slot, the same number as the CSS color index (c00 = 0). Community lists put green R.O.B. 6th, so **index 5 (c05)**. Confirmed on hardware 2026-10-16: green R.O.B. logs `color 5`.
 - **Not found:** CPU level, the cursor position, and which plugin prints `CharacterInfo { color_start_index ... }`. All three need hardware or the user's SD card.
 
 ## 1. Roster data (ui_chara_db)

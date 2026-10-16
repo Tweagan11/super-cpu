@@ -3,16 +3,18 @@
 //!
 //! Runs on its own thread. The game thread hands it finished frames (and
 //! input acks) through bounded channels and never waits on the network.
-//! Input packets (kind 2) come back on the same socket and go to `input.rs`.
+//! Input packets (kind 2) come back on a clone of the same socket, read by
+//! a receive thread, and go to `input.rs`. Log lines go out as kind 6.
 
 use std::io::ErrorKind;
 use std::net::{IpAddr, UdpSocket};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
+use crate::log;
 use crate::input::{self, ack_packet, status_packet, Ack, InputReceiver, Inputs};
 use crate::state::{FighterState, FrameState};
 use crate::version::running_game_version;
@@ -126,109 +128,93 @@ fn send(sock: &UdpSocket, packet: &[u8], target: &str) -> bool {
     }
 }
 
-/// Reads every input packet waiting on the socket (it's non-blocking) and
-/// hands each to the receiver. Returns false on an unexpected receive error;
-/// the caller then stops receiving on this socket but keeps sending, so a
-/// receive problem can never interrupt state. Only packets from the
-/// configured PC are accepted.
-fn drain_inputs(sock: &UdpSocket, rx: &mut InputReceiver, pc_ip: Option<IpAddr>, live_frame: u32) -> bool {
-    let mut buf = [0u8; 64];
-    // Bounded so a flood can't starve the send side.
-    for _ in 0..MAX_DRAIN {
-        match sock.recv_from(&mut buf) {
-            Ok((n, from)) => {
-                if pc_ip.map_or(true, |ip| ip == from.ip()) {
-                    rx.handle(&input::SHARED, &buf[..n], input::now_ms(), live_frame);
-                } else {
-                    input::SHARED.rejected.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => return true,
-            // Windows-style "port unreachable" bounces off a closed bridge; harmless.
-            Err(e) if e.kind() == ErrorKind::ConnectionReset || e.kind() == ErrorKind::ConnectionRefused => continue,
-            Err(e) => {
-                println!("[super-cpu] udp receive failed: {e}, inputs off until the socket is rebound");
-                return false;
-            }
+/// The state frame the game is on, for filing inputs. Written by the send
+/// loop, read by the receive thread.
+static LIVE_FRAME: AtomicU32 = AtomicU32::new(0);
+/// Bumped on every rebind so an old receive thread knows to quit.
+static SOCKET_GEN: AtomicU32 = AtomicU32::new(0);
+
+/// Receives input packets on their own thread, on a clone of the send socket
+/// (so the PC can just reply to where state came from). A plain blocking
+/// receive: it can wait as long as it likes without ever holding up state.
+/// The read timeout is only there so the thread notices a rebind and quits;
+/// if the platform ignores it, an old thread just sits on a dead socket.
+fn spawn_receiver(sock: &UdpSocket, pc_ip: Option<IpAddr>) -> bool {
+    let s = match sock.try_clone() {
+        Ok(s) => s,
+        Err(e) => {
+            log::log(format!("inputs off: couldn't clone the UDP socket for receiving: {e}"));
+            return false;
         }
-    }
-    true
-}
-
-const MAX_DRAIN: usize = 32;
-
-/// How long the loop waits on the frame channel before checking the socket
-/// again. Bounds how stale an input can get before it's filed (SSB-6).
-const POLL: Duration = Duration::from_millis(1);
-
-/// Makes `sock` safe to receive on from the send loop. True if it is.
-fn setup_receive(sock: &UdpSocket) -> bool {
-    // Set both: non-blocking is what we want, the 1 ms read timeout is the
-    // backstop in case one is accepted but ignored.
-    let nonblocking = sock.set_nonblocking(true).is_ok();
-    let timeout = sock.set_read_timeout(Some(POLL)).is_ok();
-    nonblocking || timeout
-}
-
-/// Check that an empty receive really comes back right away. If the socket
-/// layer accepted our settings but ignored them, `recv_from` would block until
-/// a packet arrives, and since the PC only sends inputs in answer to state,
-/// state would stop for good. So test it on a throwaway socket in a throwaway
-/// thread first. If the test hangs, that thread and socket just sit there
-/// unused. Err says why it failed, for the log.
-///
-/// This runs at boot, when the network often isn't up yet (bind fails), so
-/// `run` retries it a few times instead of turning inputs off for good.
-fn receive_works() -> Result<(), String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let spawned = std::thread::Builder::new().spawn(move || {
-        let r = match UdpSocket::bind("0.0.0.0:0") {
-            Err(e) => Err(format!("test bind failed: {e}")),
-            Ok(s) => {
-                let nb = s.set_nonblocking(true);
-                let to = s.set_read_timeout(Some(POLL));
-                if nb.is_err() && to.is_err() {
-                    Err(format!("set_nonblocking: {nb:?}, set_read_timeout: {to:?}"))
-                } else {
-                    let mut buf = [0u8; 8];
-                    let t = Instant::now();
-                    match s.recv_from(&mut buf) {
-                        Ok(_) => Err("test socket got a packet?".into()),
-                        Err(_) if t.elapsed() < Duration::from_millis(100) => Ok(()),
-                        Err(e) => Err(format!("empty receive took {:?} ({e})", t.elapsed())),
+    };
+    let _ = s.set_nonblocking(false);
+    let timeout_ok = s.set_read_timeout(Some(RECV_TIMEOUT)).is_ok();
+    let gen = SOCKET_GEN.load(Ordering::Relaxed);
+    let spawned = std::thread::Builder::new().name("super-cpu-rx".into()).spawn(move || {
+        let mut rx = InputReceiver::new();
+        let mut buf = [0u8; 64];
+        let mut first = true;
+        while SOCKET_GEN.load(Ordering::Relaxed) == gen {
+            let t = Instant::now();
+            match s.recv_from(&mut buf) {
+                Ok((n, from)) => {
+                    if first {
+                        first = false;
+                        log::log(format!("first packet from the PC: {from}"));
+                    }
+                    if pc_ip.map_or(true, |ip| ip == from.ip()) {
+                        rx.handle(&input::SHARED, &buf[..n], input::now_ms(), LIVE_FRAME.load(Ordering::Relaxed));
+                    } else {
+                        input::SHARED.rejected.fetch_add(1, Ordering::Relaxed);
                     }
                 }
+                // Timeouts, and Windows-style "port unreachable" bounces off a
+                // closed bridge. Back off a little if they come back instantly
+                // so a misbehaving socket can't spin this thread.
+                Err(e) if matches!(
+                    e.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::ConnectionReset | ErrorKind::ConnectionRefused
+                ) => {
+                    if t.elapsed() < Duration::from_millis(1) {
+                        sleep(Duration::from_millis(1));
+                    }
+                }
+                Err(e) => {
+                    log::log(format!("inputs off: UDP receive failed: {e} ({:?})", e.kind()));
+                    input::RECEIVING.store(false, Ordering::Relaxed);
+                    return;
+                }
             }
-        };
-        let _ = tx.send(r);
+        }
     });
-    if let Err(e) = spawned {
-        return Err(format!("thread spawn failed: {e}"));
+    match spawned {
+        Ok(_) => {
+            log::log(format!(
+                "inputs on: receiving on a socket clone (read timeout {})",
+                if timeout_ok { "set" } else { "not supported, fine" }
+            ));
+            true
+        }
+        Err(e) => {
+            log::log(format!("inputs off: couldn't start the receive thread: {e}"));
+            false
+        }
     }
-    rx.recv_timeout(Duration::from_millis(500))
-        .unwrap_or_else(|_| Err("empty receive blocked for 500 ms".into()))
 }
 
-/// Retries for `receive_works`, spaced out so a boot-time failure (network
-/// not up yet) doesn't disable inputs for the whole session.
-const PROBE_TRIES: u32 = 12;
-const PROBE_EVERY: Duration = Duration::from_secs(5);
+const RECV_TIMEOUT: Duration = Duration::from_millis(250);
+const LOG_RESEND_EVERY: Duration = Duration::from_secs(5);
 
 /// Runs forever on its own thread: forwards each finished frame as a state
 /// packet, sends a heartbeat (plus a control status packet) every 500 ms,
-/// receives input packets on the same socket so the PC can just reply to
-/// where state came from, and sends an ack for each input the game applied.
-/// Rebinds if the network drops. `health` is read fresh for each heartbeat.
+/// sends an ack for each input the game applied, and forwards plugin log
+/// lines (kind 6). Inputs come in on the receive thread. Rebinds if the
+/// network drops. `health` is read fresh for each heartbeat.
 pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, health: fn() -> Health) {
     let target = format!("{}:{}", cfg.pc_ip, cfg.udp_port);
     let pc_ip: Option<IpAddr> = cfg.pc_ip.parse().ok();
     let start = Instant::now();
     let mut seq: u32 = 0;
-    let mut rx = InputReceiver::new();
-    let mut live_frame: u32 = 0;
-    let mut can_receive = false;
-    let mut probes = 0u32;
-    let mut next_probe = Instant::now();
     loop {
         let sock = match UdpSocket::bind("0.0.0.0:0") {
             Ok(s) => s,
@@ -238,47 +224,24 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
                 continue;
             }
         };
-        // Never let a receive stall the send loop. If that can't be
-        // guaranteed, inputs are off but state keeps flowing.
-        let mut receiving = false;
-        println!("[super-cpu] streaming to {target}");
+        SOCKET_GEN.fetch_add(1, Ordering::Relaxed);
+        let receiving = spawn_receiver(&sock, pc_ip);
+        input::RECEIVING.store(receiving, Ordering::Relaxed);
+        log::log(format!("streaming to {target}"));
         let mut next_heartbeat = Instant::now();
+        let mut next_log_resend = Instant::now();
+        let mut logs_sent = 0u32;
         'conn: loop {
-            if !receiving && probes < PROBE_TRIES && Instant::now() >= next_probe {
-                probes += 1;
-                next_probe = Instant::now() + PROBE_EVERY;
-                if !can_receive {
-                    match receive_works() {
-                        Ok(()) => can_receive = true,
-                        Err(why) => println!(
-                            "[super-cpu] input receive test {probes}/{PROBE_TRIES} failed: {why}"
-                        ),
-                    }
-                }
-                if can_receive {
-                    receiving = setup_receive(&sock);
-                    input::RECEIVING.store(receiving, Ordering::Relaxed);
-                    println!(
-                        "[super-cpu] inputs {}",
-                        if receiving { "on" } else { "off: couldn't make the socket non-blocking" }
-                    );
-                }
-            }
-            if receiving && !drain_inputs(&sock, &mut rx, pc_ip, live_frame) {
-                receiving = false;
-                input::RECEIVING.store(false, Ordering::Relaxed);
-            }
             while let Ok(a) = acks.try_recv() {
                 if !send(&sock, &ack_packet(seq, &a), &target) {
                     break 'conn;
                 }
                 seq = seq.wrapping_add(1);
             }
-            let wait = next_heartbeat.saturating_duration_since(Instant::now());
-            let wait = if receiving { wait.min(POLL) } else { wait };
+            let wait = next_heartbeat.saturating_duration_since(Instant::now()).min(ACK_POLL);
             match frames.recv_timeout(wait) {
                 Ok(frame) => {
-                    live_frame = frame.frame;
+                    LIVE_FRAME.store(frame.frame, Ordering::Relaxed);
                     if !send(&sock, &state_packet(seq, &frame), &target) {
                         break;
                     }
@@ -286,6 +249,19 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
+            }
+            // New log lines go out right away; the whole recent set again
+            // every few seconds, so a listener started late still sees boot.
+            let resend = Instant::now() >= next_log_resend;
+            if resend {
+                next_log_resend = Instant::now() + LOG_RESEND_EVERY;
+            }
+            for (id, text) in log::pending(if resend { 0 } else { logs_sent }) {
+                if !send(&sock, &log::log_packet(seq, id, &text), &target) {
+                    break 'conn;
+                }
+                seq = seq.wrapping_add(1);
+                logs_sent = logs_sent.max(id + 1);
             }
             // Checked every pass so heartbeats keep going during matches too.
             if Instant::now() >= next_heartbeat {
@@ -305,6 +281,9 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
         sleep(RETRY_AFTER);
     }
 }
+
+/// Upper bound on how long an ack waits before it's sent.
+const ACK_POLL: Duration = Duration::from_millis(1);
 
 #[cfg(test)]
 mod tests {

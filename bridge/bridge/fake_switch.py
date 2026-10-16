@@ -55,6 +55,7 @@ from .wire import (
     pack_ack,
     pack_control_status,
     pack_heartbeat,
+    pack_log,
     pack_state,
     unpack_header,
     unpack_input,
@@ -383,6 +384,9 @@ def run(host: str, port: int, drop: float, version: str, match: bool, seconds: f
                 next_hb = now + 0.5
                 send(pack_heartbeat(seq, int((now - start) * 1000), version, True, 2 * frame, frame))
                 send(pack_control_status(seq, status()))
+                # like the plugin: recent log lines resent every few seconds
+                if int((now - start) * 2) % 10 == 0:
+                    send(pack_log(seq, 0, "fake switch: inputs on"))
             # Short naps so incoming inputs get picked up promptly, like the
             # plugin's 1 ms poll.
             time.sleep(0.001 if match else 0.01)

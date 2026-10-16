@@ -23,6 +23,7 @@ mod config;
 mod control;
 mod frame;
 mod input;
+mod log;
 mod net;
 mod offsets;
 mod state;
@@ -36,24 +37,22 @@ const ACK_QUEUE: usize = 16;
 
 #[skyline::main(name = "super_cpu")]
 pub fn main() {
-    println!(
-        "[super-cpu] plugin loaded, protocol v{}, expecting game {}",
+    crate::log::log(format!("plugin loaded, protocol v{}, expecting game {}",
         net::PROTO_VERSION,
         version::EXPECTED_GAME_VERSION
-    );
+    ));
 
     // On a mismatch this only logs; state.rs checks the result every frame
     // and the heartbeat carries the running version to the PC.
     version::check();
 
     let cfg = config::load();
-    println!(
-        "[super-cpu] config: pc {}:{}, bot port {} (input player_idx {})",
+    crate::log::log(format!("config: pc {}:{}, bot port {} (input player_idx {})",
         cfg.pc_ip,
         cfg.udp_port,
         cfg.bot_port,
         cfg.bot_player_idx()
-    );
+    ));
 
     let (tx, rx) = std::sync::mpsc::sync_channel(FRAME_QUEUE);
     let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(ACK_QUEUE);

@@ -185,6 +185,22 @@ Sent right after each heartbeat (every 500 ms). Tells the PC which port the plug
 
 64 bytes. Counters run from plugin boot. `idx_seen`, `cpu_idx_seen` and `orig` are there to answer the open questions in `docs/hooks.md` on the first hardware run.
 
+## Log line (kind 6, plugin to PC) - built
+
+Plugin log messages, since `cargo skyline listen` doesn't show the plugin's
+println output on every setup. `udp_listen` and `bridge.run` print them as
+`[switch] ...`. No version bump: older bridges ignore unknown kinds.
+
+| Offset | Type | Field |
+| --- | --- | --- |
+| 12 | u32 | id, counting up from 0 since the plugin loaded |
+| 16 | u16 | text length in bytes (at most 200) |
+| 18 | bytes | UTF-8 text |
+
+New lines go out right away, and the last 24 are resent every 5 s so a
+listener started after boot still sees them. The PC prints each id once and
+forgets the ids when the heartbeat's uptime goes backwards (plugin restart).
+
 ## Golden bytes
 
 `plugin/src/input.rs` and `bridge/tests/test_inputs.py` both check the same hex strings for an input, an ack and a control status packet, and `plugin/src/net.rs` (`state_v3_golden`) and `bridge/tests/test_capture.py` check the v3 state packet with captured inputs, so a layout change on one side fails the other side's tests.

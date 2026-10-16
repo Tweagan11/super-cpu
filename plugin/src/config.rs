@@ -59,7 +59,7 @@ pub fn load() -> Config {
         Err(_) => {
             let _ = std::fs::create_dir_all(CONFIG_DIR);
             let _ = std::fs::write(CONFIG_PATH, template(&cfg));
-            println!("[super-cpu] no config found, wrote a template to {}", CONFIG_PATH);
+            crate::log::log(format!("no config found, wrote a template to {}", CONFIG_PATH));
         }
     }
     cfg
@@ -82,7 +82,7 @@ fn parse_into(text: &str, cfg: &mut Config) {
             }
             "bot_port" => match value.parse::<u8>() {
                 Ok(p) if (1..=8).contains(&p) => cfg.bot_port = p,
-                _ => println!("[super-cpu] bot_port must be 1 to 8, got {value:?}, keeping {}", cfg.bot_port),
+                _ => crate::log::log(format!("bot_port must be 1 to 8, got {value:?}, keeping {}", cfg.bot_port)),
             },
             "cpu_probe" => cfg.cpu_probe = !matches!(value, "0" | "false" | "off"),
             "fim_player_idx" => {

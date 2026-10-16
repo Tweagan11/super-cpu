@@ -56,13 +56,12 @@ pub fn check() -> bool {
     let running = running_game_version();
     let ok = game_version_ok();
     if ok {
-        println!("[super-cpu] game version {running} matches, state streaming on");
+        crate::log::log(format!("game version {running} matches, state streaming on"));
     } else {
-        println!(
-            "[super-cpu] GAME VERSION MISMATCH: running {:?}, expected {:?}. \
+        crate::log::log(format!("GAME VERSION MISMATCH: running {:?}, expected {:?}. \
              Heartbeats only, no state packets will be sent.",
             running, EXPECTED_GAME_VERSION
-        );
+        ));
     }
     ok
 }

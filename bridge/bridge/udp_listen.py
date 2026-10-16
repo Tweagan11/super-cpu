@@ -19,7 +19,7 @@ from .matches import FrameTracker, MatchEnded, MatchStarted, MatchWatcher  # noq
 from .stages import stage_layout, stage_name
 from .statuses import status_name
 from .protocol import Fighter, Frame, Inputs
-from .wire import KIND_CONTROL_STATUS, BadPacket, Heartbeat, bits_list, unpack_control_status
+from .wire import KIND_CONTROL_STATUS, BadPacket, Heartbeat, LogDedup, LogLine, bits_list, unpack_control_status
 
 
 class SeqTracker:
@@ -117,6 +117,7 @@ def listen(
     watcher = watcher or make_watcher()
     frames = watcher.boundary.frames
     seqs = SeqTracker()
+    logs = LogDedup()
     sender = None
     last_uptime = 0
     started = last_report = last_live = time.monotonic()
@@ -150,6 +151,7 @@ def listen(
                 if last_uptime and hb.uptime_ms < last_uptime:
                     print("[listen] uptime went backwards: the plugin restarted")
                     seqs = SeqTracker()
+                    logs.reset()
                     seqs.see(header.seq)
                 last_uptime = hb.uptime_ms
                 health = hb
@@ -160,6 +162,9 @@ def listen(
                     )
             elif isinstance(msg, Frame):
                 latest = msg
+            elif isinstance(msg, LogLine):
+                if logs.new(msg):
+                    print(f"[switch] {msg.text}")
             elif header.kind == KIND_CONTROL_STATUS:
                 try:
                     control = unpack_control_status(buf)

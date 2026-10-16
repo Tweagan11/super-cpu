@@ -40,10 +40,12 @@ from .wire import (
     KIND_ACK,
     KIND_CONTROL_STATUS,
     KIND_HEARTBEAT,
+    KIND_LOG,
     KIND_STATE,
     Ack,
     BadPacket,
     ControlStatus,
+    LogDedup,
     bits_list,
     pack_input,
     unpack_ack,
@@ -171,6 +173,7 @@ class Bridge:
 
         self.switch: tuple[str, int] | None = None
         self.seqs = SeqTracker()
+        self.logs = LogDedup()
         self.history = History()
         self.recorder = BotInputRecorder(logger, bot_port) if logger is not None else None
         hooks: list[object] = [_MatchHooks(self)]
@@ -245,11 +248,16 @@ class Bridge:
             elif header.kind == KIND_CONTROL_STATUS:
                 _, st = self.watcher.packet(buf, time.monotonic())
                 self._on_status(st)
+            elif header.kind == KIND_LOG:
+                _, line = self.watcher.packet(buf, time.monotonic())
+                if self.logs.new(line):
+                    self.log(f"[switch] {line.text}")
             elif header.kind == KIND_HEARTBEAT:
                 _, hb = self.watcher.packet(buf, time.monotonic())
                 if self.last_uptime and hb.uptime_ms < self.last_uptime:
                     self.log("[run] uptime went backwards: the plugin restarted")
                     self.seqs = SeqTracker()
+                    self.logs.reset()
                     self.seqs.see(header.seq)
                 self.last_uptime = hb.uptime_ms
                 if self.expect_version and hb.game_version != self.expect_version:

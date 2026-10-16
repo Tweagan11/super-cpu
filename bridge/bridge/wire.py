@@ -19,6 +19,7 @@ KIND_INPUT = 2
 KIND_HEARTBEAT = 3
 KIND_ACK = 4
 KIND_CONTROL_STATUS = 5
+KIND_LOG = 6  # plugin log line (plugin/src/log.rs)
 
 HEADER_FMT = "<4sHHI"  # magic, proto_version, kind, seq
 HEADER_LEN = struct.calcsize(HEADER_FMT)  # 12
@@ -255,3 +256,46 @@ def unpack_heartbeat(buf: bytes) -> Heartbeat:
         raise BadPacket("not a heartbeat")
     uptime_ms, ver, hooked, calls, queued = struct.unpack_from(HEARTBEAT_FMT, buf, HEADER_LEN)
     return Heartbeat(h, uptime_ms, ver.rstrip(b"\0").decode(errors="replace"), bool(hooked), calls, queued)
+
+
+# Log lines (kind 6): header + id (u32) + len (u16) + UTF-8 text.
+LOG_FMT = "<IH"
+
+
+@dataclass(frozen=True)
+class LogLine:
+    header: Header
+    id: int
+    text: str
+
+
+def pack_log(seq: int, line_id: int, text: str) -> bytes:
+    t = text.encode()[:200]
+    return pack_header(KIND_LOG, seq) + struct.pack(LOG_FMT, line_id, len(t)) + t
+
+
+def unpack_log(buf: bytes) -> LogLine:
+    h = unpack_header(buf)
+    n0 = HEADER_LEN + struct.calcsize(LOG_FMT)
+    if h.kind != KIND_LOG or len(buf) < n0:
+        raise BadPacket("not a log packet")
+    line_id, n = struct.unpack_from(LOG_FMT, buf, HEADER_LEN)
+    return LogLine(h, line_id, buf[n0:n0 + n].decode(errors="replace"))
+
+
+class LogDedup:
+    """The plugin resends its recent lines every few seconds; print each once.
+    Ids restart at 0 when the plugin restarts: call reset() then (the
+    heartbeat's uptime going backwards)."""
+
+    def __init__(self) -> None:
+        self.seen: set[int] = set()
+
+    def reset(self) -> None:
+        self.seen.clear()
+
+    def new(self, line: LogLine) -> bool:
+        if line.id in self.seen:
+            return False
+        self.seen.add(line.id)
+        return True

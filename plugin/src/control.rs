@@ -121,9 +121,9 @@ pub fn install(cpu_probe: bool) {
             FIM_OFFSET.store(off, Ordering::Relaxed);
             skyline::install_hooks!(handle_final_input_mapping);
             input::HOOK_INSTALLED.store(true, Ordering::Relaxed);
-            println!("[super-cpu] final input mapping hook installed, bot on port {}", input::bot_port());
+            crate::log::log(format!("final input mapping hook installed, bot on port {}", input::bot_port()));
         }
-        None => println!("[super-cpu] final input mapping not found, the PC can't drive the bot"),
+        None => crate::log::log(format!("final input mapping not found, the PC can't drive the bot")),
     }
     if !cpu_probe {
         return;
@@ -133,8 +133,8 @@ pub fn install(cpu_probe: bool) {
             CPU_OFFSET.store(off, Ordering::Relaxed);
             skyline::install_hooks!(set_cpu_controls);
             input::CPU_PROBE_INSTALLED.store(true, Ordering::Relaxed);
-            println!("[super-cpu] cpu controls probe installed (read only)");
+            crate::log::log(format!("cpu controls probe installed (read only)"));
         }
-        None => println!("[super-cpu] set_cpu_controls not found, cpu probe off"),
+        None => crate::log::log(format!("set_cpu_controls not found, cpu probe off")),
     }
 }

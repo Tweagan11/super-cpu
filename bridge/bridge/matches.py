@@ -23,10 +23,12 @@ from .protocol import Fighter, Frame
 from .wire import (
     KIND_CONTROL_STATUS,
     KIND_HEARTBEAT,
+    KIND_LOG,
     KIND_STATE,
     Header,
     Heartbeat,
     unpack_control_status,
+    unpack_log,
     unpack_header,
     unpack_heartbeat,
     unpack_state,
@@ -223,6 +225,8 @@ class MatchWatcher:
             st = unpack_control_status(buf)
             self._emit("on_control_status", st)
             return header, st
+        if header.kind == KIND_LOG:
+            return header, unpack_log(buf)
         return header, None
 
     def poll(self, now: float) -> MatchEnded | None:
