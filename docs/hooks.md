@@ -72,3 +72,7 @@ The probe is there so that switching later is cheap: one hardware session tells 
 - `UdpSocket::try_clone` fails (os error 1), so the receive thread shares the send socket through an `Arc` instead.
 - A socket bound to `0.0.0.0:0` has no usable port until it has sent something: `recv_from` before the first send fails with os error 1. The receive thread starts after the first heartbeat goes out, and that fixed it.
 - One thread blocking in `recv_from` (20 ms read timeout) while another sends on the same socket works. One state send took 4.05 ms in the first session; the plugin now reports every 10 s how many sends went over 4 ms, to tell Wi-Fi jitter apart from sends waiting on the receive.
+
+## Latency on hardware (SSB-7, 2026-10-16, Wi-Fi)
+
+`bridge.latency`, 60 s: round trip median 2 frames, p99 2, max 3, 0 late, 0 lost, 0 of 7433 state packets lost. An earlier run had about 13 stalls of 8+ frames per minute, one per 5 s; they were the plugin resending its log lines in bursts, and went away once that stopped during play. So `bridge.run` defaults to `--delay 3` and training to `--max-delay 4` (one frame of margin on each).

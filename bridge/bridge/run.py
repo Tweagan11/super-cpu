@@ -394,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=4243)
     ap.add_argument("--policy", choices=sorted(POLICIES), default="walk")
-    ap.add_argument("--delay", type=int, default=2, help="apply_at = state frame + this (frames)")
+    ap.add_argument("--delay", type=int, default=3, help="apply_at = state frame + this (frames). 3 = measured worst case on Wi-Fi (SSB-7)")
     ap.add_argument("--bot-port", type=int, default=2, choices=(1, 2), help="must match bot_port in config.toml")
     ap.add_argument("--expect-version", default="13.0.4")
     ap.add_argument("--report-every", type=float, default=5.0)
