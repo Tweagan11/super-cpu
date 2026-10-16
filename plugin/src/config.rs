@@ -16,6 +16,10 @@
 //! `fim_player_idx` overrides which final-input-mapping player index counts
 //! as the bot; leave it out unless docs/hooks.md says you need it.
 //! `cpu_probe = 0` turns off the read-only CPU controls probe.
+//! `drive_cpu = true` makes the bot's port a CPU slot the PC drives (no
+//! controller needed, the card survives rematches, docs/hooks.md section 3).
+//! `cpu_controller_index` overrides which `controller_index` the CPU hook
+//! treats as the bot; leave it out unless the match-start log is wrong.
 //! `auto_menu = true` lets the PC press menu buttons on the bot's controller
 //! outside matches (SSB-25, off by default).
 //! `force_fighter = true` makes the ports in `force_ports` (1-based, `[2]` or
@@ -37,6 +41,11 @@ pub struct Config {
     pub fim_player_idx: Option<i32>,
     /// Install the read-only set_cpu_controls probe (docs/hooks.md).
     pub cpu_probe: bool,
+    /// The bot's port is a CPU: write the PC's inputs into its CPU controls
+    /// instead of the final input mapping (docs/hooks.md section 3).
+    pub drive_cpu: bool,
+    /// controller_index of the bot's CPU, if auto-detection needs help.
+    pub cpu_controller_index: Option<i32>,
     /// Install the menu press hook and apply kind 8 packets (docs/hooks.md).
     pub auto_menu: bool,
     /// Force R.O.B. on `force_ports` (docs/hooks.md section 6).
@@ -51,7 +60,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { pc_ip: "192.168.1.50".into(), udp_port: 4243, bot_port: 2, fim_player_idx: None, cpu_probe: true, auto_menu: false,
+        Self { pc_ip: "192.168.1.50".into(), udp_port: 4243, bot_port: 2, fim_player_idx: None, cpu_probe: true, auto_menu: false, drive_cpu: false, cpu_controller_index: None,
             force_fighter: false, force_ports: vec![2], force_costume: 5, force_copy_hook: true }
     }
 }
@@ -65,6 +74,8 @@ impl Config {
 pub fn template(cfg: &Config) -> String {
     format!(
         "# super-cpu plugin config\npc_ip = \"{}\"\nudp_port = {}\n# port the PC bot drives (1-based); match it with the bridge's --bot-port\nbot_port = {}\n\
+         # the PC drives a CPU card on bot_port instead of a controller (docs/hooks.md section 3)\n\
+         # drive_cpu = true\n\
          # force green R.O.B. on these ports without touching the CSS (game 13.0.4 only)\n\
          # force_fighter = true\n\
          # force_ports = [2]\n\
@@ -118,6 +129,12 @@ fn parse_into(text: &str, cfg: &mut Config) {
                 Ok(p) if (1..=8).contains(&p) => cfg.bot_port = p,
                 _ => crate::log::log(format!("bot_port must be 1 to 8, got {value:?}, keeping {}", cfg.bot_port)),
             },
+            "drive_cpu" => cfg.drive_cpu = matches!(value, "1" | "true" | "on"),
+            "cpu_controller_index" => {
+                if let Ok(i) = value.parse() {
+                    cfg.cpu_controller_index = Some(i);
+                }
+            }
             "auto_menu" => cfg.auto_menu = matches!(value, "1" | "true" | "on"),
             "force_fighter" => cfg.force_fighter = matches!(value, "1" | "true" | "on"),
             "force_copy_hook" => cfg.force_copy_hook = !matches!(value, "0" | "false" | "off"),
@@ -174,6 +191,18 @@ mod tests {
     }
 
     #[test]
+    fn drive_cpu_keys() {
+        let mut c = Config::default();
+        assert!(!c.drive_cpu && c.cpu_controller_index.is_none(), "off by default");
+        parse_into("drive_cpu = true\ncpu_controller_index = 3\n", &mut c);
+        assert!(c.drive_cpu);
+        assert_eq!(c.cpu_controller_index, Some(3));
+        parse_into("drive_cpu = off\ncpu_controller_index = x\n", &mut c);
+        assert!(!c.drive_cpu);
+        assert_eq!(c.cpu_controller_index, Some(3));
+    }
+
+    #[test]
     fn force_keys() {
         let mut c = Config::default();
         assert!(!c.force_fighter && c.force_ports == vec![2] && c.force_costume == 5 && c.force_copy_hook);
@@ -197,7 +226,7 @@ mod tests {
     #[test]
     fn template_parses_back() {
         let d = Config::default();
-        let mut c = Config { pc_ip: String::new(), udp_port: 0, bot_port: 1, fim_player_idx: None, cpu_probe: false, auto_menu: false,
+        let mut c = Config { pc_ip: String::new(), udp_port: 0, bot_port: 1, fim_player_idx: None, cpu_probe: false, auto_menu: false, drive_cpu: true, cpu_controller_index: Some(9),
             force_fighter: false, force_ports: vec![], force_costume: 0, force_copy_hook: false };
         parse_into(&template(&d), &mut c);
         assert_eq!((c.pc_ip, c.udp_port, c.bot_port), (d.pc_ip, d.udp_port, d.bot_port));

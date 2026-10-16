@@ -18,6 +18,8 @@
 //! - SSB-24: with `force_fighter = true`, forces green R.O.B. onto the
 //!   configured ports by writing the game's decided-fighter record
 //!   (`force.rs`, `force_hook.rs`), and checks it in the match
+//! - drive_cpu: with `drive_cpu = true` the PC drives a CPU slot instead of a
+//!   controller, written in the CPU controls hook (`control.rs`, `cpu_drive.rs`)
 //! - SSB-10 (game version half): no state packets on a mismatched build
 //!   (`version.rs`)
 //!
@@ -27,6 +29,7 @@
 
 mod config;
 mod control;
+mod cpu_drive;
 mod force;
 mod force_hook;
 mod frame;
@@ -70,7 +73,7 @@ pub fn main() {
     state::init(tx);
     input::init(cfg.bot_port, cfg.bot_player_idx(), cfg.fim_player_idx.is_some(), ack_tx);
     frame::install();
-    control::install(cfg.cpu_probe);
+    control::install(cfg.cpu_probe, cfg.drive_cpu, cfg.cpu_controller_index);
     menu_hook::install(cfg.bot_port as u32 - 1, cfg.auto_menu);
     force_hook::install(cfg.force_fighter, &cfg.force_ports, cfg.force_costume, cfg.force_copy_hook);
 

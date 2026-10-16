@@ -176,6 +176,7 @@ FLAG_SESSION_ACTIVE = 2
 FLAG_RECEIVING = 4
 FLAG_CPU_PROBE = 8
 FLAG_FIM_OVERRIDE = 16  # fim_player_idx is set in config.toml
+FLAG_DRIVE_CPU = 32  # drive_cpu = true: the bot is a CPU slot
 
 
 @dataclass(frozen=True)
@@ -197,6 +198,10 @@ class ControlStatus:
     orig: Inputs = Inputs()
     # v3: player_idx the plugin captures as the port that isn't the bot
     other_player_idx: int = 0
+
+    @property
+    def drive_cpu(self) -> bool:
+        return bool(self.flags & FLAG_DRIVE_CPU)
 
     @property
     def fim_override(self) -> bool:
