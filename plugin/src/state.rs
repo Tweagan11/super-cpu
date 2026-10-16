@@ -184,6 +184,9 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
         c.current.fighters[entry as usize] = fighter;
         c.current.cm_inputs[entry as usize] = cm;
         c.current.cm_valid |= if entry == 0 { CAP_P1_CM } else { CAP_P2_CM };
+        if crate::input::drive_cpu() && entry as u8 + 1 == crate::input::bot_port() {
+            check_drive_agreement(entry as usize, c.current.frame, cm);
+        }
         // Same global the modpack reads mid-match (save_states.rs, tech.rs).
         // The stage can't change during a match, but reading it every
         // frame is one cheap call and avoids caring about match start order.
@@ -224,6 +227,30 @@ unsafe fn read_control_inputs(acc: &mut BattleObjectModuleAccessor) -> Inputs {
         cstick_x: stick_to_i8(ControlModule::get_sub_stick_x(acc)),
         cstick_y: stick_to_i8(ControlModule::get_sub_stick_y(acc)),
         buttons: cm_buttons(|idx| ControlModule::check_button_on(acc, idx)),
+    }
+}
+
+/// drive_cpu cross-check: the inputs the CPU hook wrote for this frame (in the
+/// capture ring, marked driven) against what the bot's ControlModule reports
+/// now. Counts agreements, logs the first few disagreements and a summary
+/// every 300 compared frames. Disagreement with a working walk policy means
+/// the wrong CPU was driven or the stick scaling is off (docs/hooks.md 3).
+fn check_drive_agreement(port: usize, frame: u32, cm: Inputs) {
+    use std::sync::atomic::AtomicU32;
+    static AGREE: AtomicU32 = AtomicU32::new(0);
+    static DISAGREE: AtomicU32 = AtomicU32::new(0);
+    let Some((applied, true)) = CAPTURE.get(port, frame) else { return };
+    let ok = crate::cpu_drive::cm_agrees(applied, cm);
+    let (a, d) = if ok {
+        (AGREE.fetch_add(1, Ordering::Relaxed) + 1, DISAGREE.load(Ordering::Relaxed))
+    } else {
+        (AGREE.load(Ordering::Relaxed), DISAGREE.fetch_add(1, Ordering::Relaxed) + 1)
+    };
+    if !ok && d <= 5 {
+        crate::log::log(format!("drive_cpu: frame {frame} wrote {applied:?} but the control module reads {cm:?}"));
+    }
+    if (a + d) % 300 == 0 {
+        crate::log::log(format!("drive_cpu: control module agrees with the written inputs on {a} of {} frames", a + d));
     }
 }
 

@@ -387,7 +387,7 @@ class Bridge:
         cpu = f", cpu controller_index seen {bits_list(s.cpu_idx_seen)}" if s.cpu_probe else ""
         o = s.orig
         return (
-            f"[run] hooks: input player_idx seen {bits_list(s.idx_seen)}{cpu}; "
+            f"[run] hooks{' (drive_cpu: bot is a CPU slot)' if s.drive_cpu else ''}: input player_idx seen {bits_list(s.idx_seen)}{cpu}; "
             f"game's own input for the bot's controller: stick ({o.stick_x}, {o.stick_y}) "
             f"c ({o.cstick_x}, {o.cstick_y}) buttons {o.buttons:#x}"
         )

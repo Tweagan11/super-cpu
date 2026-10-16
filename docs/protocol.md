@@ -193,7 +193,7 @@ Sent right after each heartbeat (every 500 ms). Tells the PC which port the plug
 | header | 12 bytes | |
 | bot_port | u8 | 1-based, from `bot_port` in config.toml |
 | bot_player_idx | i8 | the final input mapping `player_idx` treated as the bot |
-| flags | u8 | bit 0 input hook installed, bit 1 PC session active, bit 2 socket can receive, bit 3 CPU probe installed, bit 4 `fim_player_idx` override set in config.toml |
+| flags | u8 | bit 0 input hook installed, bit 1 PC session active, bit 2 socket can receive, bit 3 CPU probe installed, bit 4 `fim_player_idx` override set in config.toml, bit 5 `drive_cpu` on |
 | other_player_idx | i8 | v3 (was reserved): the `player_idx` captured as the port that isn't the bot |
 | fim_calls | u32 | final input mapping calls, all players |
 | idx_seen | u32 | bitmask of `player_idx` values seen (bit 31 = anything outside 0..30) |

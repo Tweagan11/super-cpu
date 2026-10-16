@@ -27,17 +27,34 @@ Rule: no raw addresses. A hook is either by symbol (skyline-smash binding) or by
 | `MappedInputs` | `src/common/input.rs`: `buttons: u32` (the `Buttons` bitflags, same as `bridge/bridge/buttons.py`), then `lstick_x, lstick_y, rstick_x, rstick_y: i8`. 8 bytes, checked with a compile-time size assert |
 | Modpack precedent | input delay (`src/training/input_delay.rs`) and input recording (`src/training/input_record.rs`, `handle_final_input_mapping`) both edit `*out` exactly like this, for player 0 |
 
-## 3. CPU controls (`OFFSET_SET_CPU_CONTROLS`): read-only probe for now
+## 3. CPU controls (`OFFSET_SET_CPU_CONTROLS`): probe, and `drive_cpu`
+
+`drive_cpu = true` (config.toml, default off) makes the bot's port a CPU that the PC drives (written up in the last part of this section). Without it this hook is the read-only probe below.
 
 | | |
 | --- | --- |
-| Code | `plugin/src/control.rs` (`set_cpu_controls`) |
+| Code | `plugin/src/control.rs` (`set_cpu_controls`), `plugin/src/cpu_drive.rs` (layout, conversion, which-CPU logic, host tested) |
 | How | byte-pattern search with `NEEDLE_SET_CPU_CONTROLS` from `src/common/offsets.rs` (text+0x2da180 in the modpack's build). Signature from `set_cpu_controls` in `src/training/input_record.rs`: `(p_data: *mut *mut u8)` |
 | Runs | after the CPU AI writes a CPU's controls for the frame |
 | What we do | only read `(*p_data.add(1)).controller_index` and report which values show up (`cpu_idx_seen` in the control status packet). Changes nothing. `cpu_probe = 0` in config.toml turns it off |
 | Modpack precedent | input playback puppets the CPU here by writing `buttons`, `stick_x/y` (floats) and `clamped_lstick_x/y` into `ControlModuleInternal` (`src/common/input.rs`) |
 
-## Why final input mapping and not the CPU hook
+### drive_cpu: the PC drives a CPU slot
+
+Why: human cards on the character select screen are cleared after every match, so unattended rematches can't start the next one. CPU cards keep their pick (Random, which `force_*.rs` turns into green R.O.B.), so the bot's port is a CPU card and the PC replaces the AI's decision every frame.
+
+- **Same pipeline.** `input::on_cpu_drive` runs the same `Applier` as the final input mapping path (pending inputs by `apply_at`, late/repeat/neutral rules, acks) through the shared `apply_bot`. The result goes into the capture ring marked driven, so the state packet's `driven` flags, the logger's ack/FIM/control-module preference and the acks all keep working. With `drive_cpu` on, the FIM hook does nothing for the bot's port (no apply, no capture), it still captures the other port.
+- **Writes** (`cpu_drive.rs`, `ControlModuleInternal::write`): `buttons` as-is; `stick_x/y = i8/127`; `clamped_lstick_x/y = clamp(i8/120, -1, 1)` zeroed under 0.2; `clamped_rstick_x/y` likewise from the c-stick. Constants and formulas from the modpack's playback (`STICK_CLAMP_MULTIPLIER = 1/120`, `STICK_NEUTRAL = 0.2`). With no PC session the AI's decision is left alone (and logged as not driven).
+- **Button layout.** The modpack's `Buttons` bitflags (`ControlModuleInternal.buttons`) and `MappedInputs.buttons` are the same type, so our bits from `bridge/buttons.py` go in unchanged. A host test checks that all 18 bits match the modpack's constants. (The ControlModule's `check_button_on` indices are a different numbering, see `input::PAD_BUTTONS`; that is only for reading.)
+- **c-stick: uncertain.** The modpack never writes `clamped_rstick_x/y`; it only reads them back as the c-stick of a `MappedInputs` in `is_input_neutral`. Putting the c-stick there is a best guess. Smash attacks from the c-stick may also need the `SMASH`/`CSTICK_ON` button bits, which we pass through from the policy untouched. Step 14 of `docs/testing-phase0.md` checks it.
+- **Which CPU is the bot.** `*p_data.add(1)` is the `ControlModuleInternal` of the CPU the call is for, and its `controller_index` is the only identity we get there (the fighter's `ControlModule` pointer isn't reachable through skyline-smash, and guessing offsets into `BattleObjectModuleAccessor` isn't worth a crash). `cpu_drive::CpuTracker` collects the distinct `controller_index` values the hook sees in a frame and uses the complete set of the *previous* frame: one distinct index means that is the bot; several (CPU vs CPU) are sorted ascending and the bot is rank `bot_port - 1` (assumes indices rise with the port). `cpu_controller_index = N` in config.toml overrides it. The first frame of a match is not driven (the set isn't complete yet). The decision is logged once: `drive_cpu: P2 is controller_index N (indices seen last frame 0x...)`. Hardware must confirm that line, and the cross-check below.
+- **Cross-check.** After each fighter update, `state.rs` compares what was written (from the capture ring) with what the bot's own ControlModule reports (`check_drive_agreement`), logging the first mismatches and `control module agrees with the written inputs on X of Y frames` every 300 frames. Persistent disagreement means the wrong CPU, or scaling/c-stick layout is off.
+- **Frame number.** One line: the target frame is `state::live_frame() + 1`, the number the next fighter update gets, which is the FIM path's rule and holds whether this hook runs before or after that frame's fighter hook (either way the next fighter update is what reads the controls).
+- **Hooks.** `drive_cpu` installs this hook even with `cpu_probe = 0`; the FIM hook stays installed (captures the other port). `FLAG_DRIVE_CPU` (status flags bit 5) is set.
+
+## Why final input mapping and not the CPU hook (the original default)
+
+This was the reasoning before `drive_cpu` existed. Points 1 and 2 are now handled as described above (identity by `controller_index`, c-stick as a documented guess); point 3 is what step 14 tests. The controller route stays the default because it's the verified one.
 
 Taking over a CPU slot would be nicer (no second controller), so we looked at it first. It's not ready:
 

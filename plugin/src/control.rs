@@ -12,8 +12,10 @@
 //! Everything that isn't game types lives in `input.rs` so it can be tested
 //! on a PC.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
+use crate::cpu_drive::{ControlModuleInternal, CpuTracker};
 use crate::input::{self, Inputs};
 
 /// The game's per-player mapped inputs. Layout from the Training Modpack,
@@ -73,28 +75,24 @@ unsafe fn handle_final_input_mapping(
 }
 
 // ---------------------------------------------------------------------------
-// CPU controls probe (read only)
+// CPU controls: probe, and with drive_cpu the bot's controls
 //
 // The modpack's `set_cpu_controls` (src/training/input_record.rs) runs after
 // the CPU AI writes its controls and gets `p_data`, where `*p_data.add(1)` is
-// the CPU's `ControlModuleInternal` (layout in src/common/input.rs):
+// that CPU's `ControlModuleInternal` (layout in cpu_drive.rs). It's called
+// once per CPU per frame. The modpack picks "the CPU" by assuming it's entry 1
+// in training mode; we use `controller_index` instead (cpu_drive.rs, docs/
+// hooks.md section 3).
 //
-//     vtable: *mut u8, controller_index: i32, buttons: Buttons, ...
-//
-// The modpack reads `controller_index` but never uses it, and it picks the
-// CPU by assuming it's entry 1 in training mode. Before we can drive a CPU
-// slot we need to know what controller_index is per CPU, so for now this
-// hook only records which values show up (sent in the control status
-// packet). It changes nothing. Turn it off with `cpu_probe = 0`.
-
-/// Only the first two fields; we never touch the rest.
-#[repr(C)]
-struct ControlModuleHead {
-    vtable: *mut u8,
-    controller_index: i32,
-}
+// Always: record which controller_index values show up (the control status
+// packet). With drive_cpu = true: for the bot's CPU, replace the AI's
+// decision with the PC's inputs. Turn the probe off with `cpu_probe = 0`
+// (drive_cpu installs the hook regardless).
 
 static CPU_OFFSET: AtomicUsize = AtomicUsize::new(0);
+/// Config `cpu_controller_index`, i32::MIN when unset.
+static CPU_OVERRIDE: AtomicI32 = AtomicI32::new(i32::MIN);
+static TRACKER: Mutex<CpuTracker> = Mutex::new(CpuTracker::new());
 
 fn cpu_offset() -> usize {
     CPU_OFFSET.load(Ordering::Relaxed)
@@ -107,15 +105,58 @@ unsafe fn set_cpu_controls(p_data: *mut *mut u8) {
     if p_data.is_null() {
         return;
     }
-    let controller_data = *p_data.add(1) as *const ControlModuleHead;
-    let idx = if controller_data.is_null() { -1 } else { (*controller_data).controller_index };
+    let module = *p_data.add(1) as *mut ControlModuleInternal;
+    if module.is_null() {
+        input::on_cpu_controls(-1);
+        return;
+    }
+    let idx = (*module).controller_index;
     input::on_cpu_controls(idx);
+    if input::drive_cpu() {
+        drive(&mut *module, idx);
+    }
+}
+
+/// drive_cpu, game thread. Is this call the bot's CPU, and if so write the
+/// PC's inputs for the frame the next fighter update reads.
+fn drive(module: &mut ControlModuleInternal, idx: i32) {
+    // Same frame number as the FIM hook; None outside a match.
+    let Some(live) = crate::state::live_frame() else { return };
+    let target = live.wrapping_add(1);
+    let ovr = CPU_OVERRIDE.load(Ordering::Relaxed);
+    let ovr = (ovr != i32::MIN).then_some(ovr);
+    let d = {
+        let mut t = match TRACKER.lock() {
+            Ok(t) => t,
+            Err(p) => p.into_inner(),
+        };
+        t.observe(target, idx, input::bot_port(), ovr)
+    };
+    if let Some(chosen) = d.announce {
+        crate::log::log(format!(
+            "drive_cpu: P{} is controller_index {} (indices seen last frame {:#x}{})",
+            input::bot_port(),
+            chosen,
+            d.seen,
+            if ovr.is_some() { ", from cpu_controller_index" } else { "" }
+        ));
+    }
+    if !d.drive {
+        return;
+    }
+    if let Some(i) = input::on_cpu_drive(module.read(), Some(live)) {
+        module.write(i);
+    }
 }
 
 /// Finds the functions by byte pattern and hooks them. If a pattern isn't
 /// found (game update), the plugin keeps streaming state and the bot just
 /// can't move; the heartbeat's control status says so.
-pub fn install(cpu_probe: bool) {
+pub fn install(cpu_probe: bool, drive_cpu: bool, cpu_controller_index: Option<i32>) {
+    input::set_drive_cpu(drive_cpu);
+    CPU_OVERRIDE.store(cpu_controller_index.unwrap_or(i32::MIN), Ordering::Relaxed);
+    // drive_cpu replaces the FIM hook for the bot's port, but the FIM hook
+    // still captures the other ports, so it's installed either way.
     match crate::offsets::fim() {
         Some(off) => {
             FIM_OFFSET.store(off, Ordering::Relaxed);
@@ -125,7 +166,7 @@ pub fn install(cpu_probe: bool) {
         }
         None => crate::log::log(format!("final input mapping not found, the PC can't drive the bot")),
     }
-    if !cpu_probe {
+    if !cpu_probe && !drive_cpu {
         return;
     }
     match crate::offsets::set_cpu_controls() {
@@ -133,8 +174,19 @@ pub fn install(cpu_probe: bool) {
             CPU_OFFSET.store(off, Ordering::Relaxed);
             skyline::install_hooks!(set_cpu_controls);
             input::CPU_PROBE_INSTALLED.store(true, Ordering::Relaxed);
-            crate::log::log(format!("cpu controls probe installed (read only)"));
+            if drive_cpu {
+                crate::log::log(format!(
+                    "drive_cpu on: the PC drives the CPU on port {} through set_cpu_controls{}",
+                    input::bot_port(),
+                    cpu_controller_index.map_or(String::new(), |i| format!(", controller_index forced to {i}"))
+                ));
+            } else {
+                crate::log::log(format!("cpu controls probe installed (read only)"));
+            }
         }
-        None => crate::log::log(format!("set_cpu_controls not found, cpu probe off")),
+        None => crate::log::log(format!(
+            "set_cpu_controls not found, {}",
+            if drive_cpu { "drive_cpu can't work" } else { "cpu probe off" }
+        )),
     }
 }

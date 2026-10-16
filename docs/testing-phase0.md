@@ -350,6 +350,32 @@ Question for the IDM plan (`training/README.md`): does the plugin send state whi
 2. Open a saved replay from the game's replay menu and let it play for a few seconds.
 3. Look for fighter lines (and a `match started` line) in the listener. Expect no `in ...` input on them. Note whether they appear, whether the frame numbers climb, and whether a `.npz` gets written at the end. Send me the answer either way.
 
+## 14. Driving a CPU slot (drive_cpu)
+
+Goal: the bot is a CPU card, so unattended rematches work (CPU cards keep their pick, human cards are cleared after each match). Design in `docs/hooks.md` section 3.
+
+### 14a. Config and match
+
+1. config.toml: `bot_port = 2`, `force_fighter = true`, `force_ports = [2]`, `drive_cpu = true`. Boot the game; expect `drive_cpu on: the PC drives the CPU on port 2 through set_cpu_controls`.
+2. Port 1 a human, port 2 a **CPU card, level 9, on Random**. Start the match. In the plugin log expect exactly one `drive_cpu: P2 is controller_index N (indices seen last frame 0x...)` and `force check: P2 robot c05 OK`. Send me the `N` and the mask.
+3. `python -m bridge.run --policy walk --bot-port 2`. Expect R.O.B. to **walk** instead of fighting like a CPU. In the status line: `acks` climb, `late` stays near 0, and `[run] hooks (drive_cpu: bot is a CPU slot)` shows. In the plugin log, `drive_cpu: control module agrees with the written inputs on X of Y frames` every 300 frames; expect X close to Y. A `wrote ... but the control module reads ...` line is the interesting failure.
+4. Stop the bridge mid-match: the CPU should go back to fighting within about 2 s.
+
+### 14b. If it drives nothing or the wrong thing
+
+- Nothing moves, no `P2 is controller_index` line: the hook isn't being called outside training mode (the modpack only ever ran it there). Say so, with `cpu_calls` from the status.
+- The wrong fighter moves (only matters with two CPUs, or a human with a second CPU): set `cpu_controller_index = N` for the other index and retry.
+- Moves, but agreement is low: look at which axis in the mismatch line. Main stick off by a fixed ratio means the scaling; only the c-stick off means `clamped_rstick` is not where the c-stick lives (try a policy that uses it, or `SMASH`).
+- Buttons ignored but sticks work: send me the mismatch line.
+
+### 14c. Auto rematch
+
+`python -m bridge.run --policy walk --bot-port 2 --auto-rematch --min-seconds 5` and walk away for a few matches (with `--log --eval 3` if you want files). Expect the next match to start with no human input, P2 still green R.O.B., and the `P2 is controller_index` line again each match (same N). A stuck CSS means the CPU card did not keep Random: report what the card shows.
+
+### 14d. Off by default
+
+Remove `drive_cpu` (or set it false), reboot: the bot is driven through the controller as before and no `drive_cpu` lines appear.
+
 ## If nothing shows up
 
 | Symptom | Likely cause |

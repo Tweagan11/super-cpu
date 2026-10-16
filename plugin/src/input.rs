@@ -183,6 +183,8 @@ pub const FLAG_CPU_PROBE: u8 = 8;
 /// `fim_player_idx` is set in config.toml (the port to player_idx mapping
 /// isn't the default one).
 pub const FLAG_FIM_OVERRIDE: u8 = 16;
+/// drive_cpu is on: the bot is a CPU slot and FIM leaves its port alone.
+pub const FLAG_DRIVE_CPU: u8 = 32;
 
 /// Everything in a control status packet (kind 5, sent with each heartbeat).
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -695,6 +697,8 @@ static CLOCK: OnceLock<Instant> = OnceLock::new();
 static BOT_PORT: AtomicU8 = AtomicU8::new(2);
 static BOT_PLAYER_IDX: AtomicI32 = AtomicI32::new(1);
 static FIM_OVERRIDE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// drive_cpu: the CPU hook applies the PC's inputs, the FIM hook doesn't.
+static DRIVE_CPU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// player_idx captured as port 1 and port 2 (`capture_map`).
 static CAPTURE_IDX: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(1)];
 /// Every port's final mapped inputs, read by state.rs when it publishes a frame.
@@ -725,6 +729,14 @@ pub fn init(bot_port: u8, bot_player_idx: i32, fim_override: bool, acks: SyncSen
     let _ = ACK_TX.set(acks);
 }
 
+pub fn set_drive_cpu(on: bool) {
+    DRIVE_CPU.store(on, Ordering::Relaxed);
+}
+
+pub fn drive_cpu() -> bool {
+    DRIVE_CPU.load(Ordering::Relaxed)
+}
+
 pub fn bot_port() -> u8 {
     BOT_PORT.load(Ordering::Relaxed)
 }
@@ -745,6 +757,9 @@ pub fn status() -> Status {
     }
     if FIM_OVERRIDE.load(Ordering::Relaxed) {
         flags |= FLAG_FIM_OVERRIDE;
+    }
+    if drive_cpu() {
+        flags |= FLAG_DRIVE_CPU;
     }
     let mut s = SHARED.status(bot_port(), BOT_PLAYER_IDX.load(Ordering::Relaxed) as i8, flags);
     // the port that isn't the bot (bot_port is 1 or 2 in practice; 3+ means
@@ -784,18 +799,9 @@ pub fn on_final_input_mapping(player_idx: i32, orig: Inputs, live_frame: Option<
     bump(&SHARED.fim_calls);
     SHARED.idx_seen.fetch_or(seen_bit(player_idx), Ordering::Relaxed);
     let target = live_frame?.wrapping_add(1);
-    let out = if player_idx == BOT_PLAYER_IDX.load(Ordering::Relaxed) {
-        SHARED.orig.store(orig.to_bits(), Ordering::Relaxed);
-        let mut applier = match APPLIER.lock() {
-            Ok(a) => a,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        applier.step(&SHARED, target, now_ms(), &mut |a| {
-            if let Some(tx) = ACK_TX.get() {
-                // never block the game; a full queue just loses the ack
-                let _ = tx.try_send(a);
-            }
-        })
+    let drive_cpu = drive_cpu();
+    let out = if player_idx == BOT_PLAYER_IDX.load(Ordering::Relaxed) && !drive_cpu {
+        apply_bot(target, orig)
     } else {
         None
     };
@@ -803,10 +809,45 @@ pub fn on_final_input_mapping(player_idx: i32, orig: Inputs, live_frame: Option<
     // `target`, for the state packet. Two atomic compares and one seqlock
     // write, no locks.
     for (port, idx) in CAPTURE_IDX.iter().enumerate() {
+        // drive_cpu: the bot's port is captured by the CPU hook (what was
+        // really applied), not from a controller that may not even exist.
+        if drive_cpu && port + 1 == bot_port() as usize {
+            continue;
+        }
         if idx.load(Ordering::Relaxed) == player_idx {
             CAPTURE.put(port, target, out.unwrap_or(orig), out.is_some());
         }
     }
+    out
+}
+
+/// The applier step shared by both hooks: what the bot's controls say on
+/// `target`, or None to leave the game's own input alone (no PC session).
+/// `orig` is what the game had there (reported in the control status).
+fn apply_bot(target: u32, orig: Inputs) -> Option<Inputs> {
+    SHARED.orig.store(orig.to_bits(), Ordering::Relaxed);
+    let mut applier = match APPLIER.lock() {
+        Ok(a) => a,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    applier.step(&SHARED, target, now_ms(), &mut |a| {
+        if let Some(tx) = ACK_TX.get() {
+            // never block the game; a full queue just loses the ack
+            let _ = tx.try_send(a);
+        }
+    })
+}
+
+/// drive_cpu: the CPU hook's call for the bot's slot, game thread. `ai` is
+/// what the CPU AI just decided, `live_frame` is `state::live_frame()`. Same
+/// frame rule as the FIM hook (the next fighter update reads what we write).
+/// Returns the inputs to write into the CPU's controls, or None to leave the
+/// AI's decision. Records the result in the capture ring either way.
+pub fn on_cpu_drive(ai: Inputs, live_frame: Option<u32>) -> Option<Inputs> {
+    let target = live_frame?.wrapping_add(1);
+    let out = apply_bot(target, ai);
+    let port = (bot_port() as usize).saturating_sub(1);
+    CAPTURE.put(port, target, out.unwrap_or(ai), out.is_some());
     out
 }
 
