@@ -407,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--model", default=None, help="model name for the logs and eval row (default: the policy)")
     ap.add_argument("--opponent", default="cpu9", help="who's on the other port: cpu9 or a player name")
     ap.add_argument("--stage", default="fd", help="fallback layout when the stage id is not Battlefield or FD/Omega")
+    ap.add_argument("--stocks", type=int, default=3, help="stock count set in the game's rules (recorded in the logs)")
     ap.add_argument("--platform", default="switch", choices=("switch", "emulator"))
     ap.add_argument("--mod-hash", default="unset")
     ap.add_argument("--min-seconds", type=float, default=10.0, help="eval: ignore matches shorter than this")
@@ -423,7 +424,7 @@ def main(argv: list[str] | None = None) -> int:
 
         session = EvalSession(
             games=args.eval, model=model, opponent=args.opponent, bot_port=args.bot_port,
-            platform=args.platform, stage=args.stage, mod_hash=args.mod_hash,
+            platform=args.platform, stage=args.stage, mod_hash=args.mod_hash, stocks=args.stocks,
             expect_version=args.expect_version, min_seconds=args.min_seconds,
             results_csv=args.results or RESULTS_CSV, data_dir=args.data_dir,
             write_logs=args.log is not None,
@@ -431,7 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.log:
             session.logger.out_dir = Path(args.log)
     elif args.log is not None:
-        from .logger import MatchLogger
+        from .logger import DEFAULT_RULESET, MatchLogger
 
         controllers = ["", ""]
         controllers[args.bot_port - 1] = f"bot:{model}"
@@ -439,6 +440,7 @@ def main(argv: list[str] | None = None) -> int:
         logger = MatchLogger(
             out_dir=args.log or None, expect_version=args.expect_version, mod_hash=args.mod_hash,
             stage=args.stage, controllers=tuple(controllers),
+            ruleset={**DEFAULT_RULESET, "stocks": args.stocks},
         )
     run(args.port, POLICIES[args.policy](), args.delay, args.bot_port, args.expect_version,
         args.report_every, args.seconds, logger=logger, session=session, idle_timeout=args.idle_timeout)

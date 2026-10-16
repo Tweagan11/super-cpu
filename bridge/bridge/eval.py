@@ -129,6 +129,7 @@ class EvalSession:
     platform: str = "switch"
     stage: str = "fd"
     mod_hash: str = "unset"
+    stocks: int = 3
     expect_version: str | None = "13.0.4"
     min_seconds: float = 10.0
     results_csv: Path = RESULTS_CSV
@@ -152,7 +153,7 @@ class EvalSession:
         controllers[2 - self.bot_port] = "cpu:9" if self.opponent == "cpu9" else self.opponent
         self.logger = MatchLogger(
             out_dir=self.data_dir / "matches", expect_version=self.expect_version,
-            mod_hash=self.mod_hash, stage=self.stage, ruleset=dict(DEFAULT_RULESET),
+            mod_hash=self.mod_hash, stage=self.stage, ruleset={**DEFAULT_RULESET, "stocks": self.stocks},
             controllers=tuple(controllers), min_frames=int(self.min_seconds * 60),
             write=self.write_logs, on_logged=self._on_logged, echo=self.echo,
         )
@@ -262,6 +263,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--opponent", default="cpu9")
     ap.add_argument("--bot-port", type=int, default=2, choices=(1, 2))
     ap.add_argument("--platform", default="switch", choices=("switch", "emulator"))
+    ap.add_argument("--stocks", type=int, default=3, help="stock count set in the game's rules (recorded in the logs)")
     ap.add_argument("--stage", default="fd", help="fallback layout when the stage id is not Battlefield or FD/Omega: battlefield, fd, omega")
     ap.add_argument("--mod-hash", default="unset")
     ap.add_argument("--expect-version", default="13.0.4")
@@ -274,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     session = EvalSession(
         games=args.games, model=args.model, opponent=args.opponent, bot_port=args.bot_port,
-        platform=args.platform, stage=args.stage, mod_hash=args.mod_hash,
+        platform=args.platform, stage=args.stage, mod_hash=args.mod_hash, stocks=args.stocks,
         expect_version=args.expect_version, min_seconds=args.min_seconds,
         results_csv=args.results, data_dir=args.data_dir, write_logs=not args.no_log,
     )
