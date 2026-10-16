@@ -122,8 +122,10 @@ class RematchTests(unittest.TestCase):
             t += step
         return t
 
-    def test_no_presses_before_a_match_ends(self):
-        self.scene("ResultScene", 1, 0.0)
+    def test_no_presses_during_a_match_at_startup(self):
+        # Started mid-match: nothing until that match ends. (Started on a menu
+        # screen it does press, see RestartTests.)
+        self.scene("MeleeScene", 1, 0.0)
         self.run_until(0.0, 5)
         self.assertEqual(self.pressed, [])
 
@@ -276,3 +278,39 @@ class HardwareSceneNameTests(unittest.TestCase):
         from bridge.rematch import PRESS_FOR
         from bridge.scenes import STAGE
         self.assertEqual(PRESS_FOR[STAGE], MB.A)
+
+
+class RestartTests(unittest.TestCase):
+    def test_restart_on_a_menu_screen_still_presses(self):
+        """bridge.run restarted while the game sits on stage select: no match
+        end was ever seen, it still has to press through."""
+        from bridge.rematch import Rematch
+        pressed, logs = [], []
+        r = Rematch(lambda b, h: pressed.append(b), logs.append)
+
+        class Sc:
+            changes, name = 7, "StageSelectScene"
+
+        r.on_scene(Sc, 0.0)
+        t = 0.0
+        while t < 5.0:
+            r.on_scene(Sc, t)
+            r.tick(t)
+            t += 0.1
+        self.assertTrue(pressed)
+        self.assertTrue(any("already on" in m for m in logs))
+
+    def test_restart_mid_match_does_not_press(self):
+        from bridge.rematch import Rematch
+        pressed = []
+        r = Rematch(lambda b, h: pressed.append(b), lambda m: None)
+
+        class Sc:
+            changes, name = 7, "MeleeScene"
+
+        t = 0.0
+        while t < 5.0:
+            r.on_scene(Sc, t)
+            r.tick(t)
+            t += 0.1
+        self.assertEqual(pressed, [])

@@ -102,6 +102,11 @@ class Rematch:
         kind = self.names.classify(scene.name)
         self.visit = _Visit(scene.changes, scene.name, kind, now, next_at=now + self.settle)
         self.log(f"[rematch] scene #{scene.changes}: {scene.name!r} ({kind})")
+        # Started (or restarted) while the game is already between matches:
+        # no match end was seen, but these screens only come after one.
+        if not self.armed and not self.in_match and kind in (RESULTS, STAGE, CSS):
+            self.armed = True
+            self.log(f"[rematch] already on {scene.name!r} with no match running: pressing through")
         if kind == OTHER and scene.name not in self._unknown:
             self._unknown.add(scene.name)
             self.log(f"[rematch] {scene.name!r} isn't a known scene; not pressing there. "
