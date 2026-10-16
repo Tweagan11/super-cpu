@@ -214,7 +214,7 @@ class PolicyTests(unittest.TestCase):
         self.play(p)
         for k, v in p.learner.model.net.state_dict().items():
             self.assertTrue(torch.equal(v, net0[k]), k)
-        self.assertNotEqual(float(p.learner.model.value.weight.abs().sum()), 0.0)
+        self.assertNotEqual(float(p.learner.model.value.weight.detach().abs().sum()), 0.0)
         self.play(p)                                 # second update moves the policy
         moved = any(not torch.equal(v, net0[k]) for k, v in p.learner.model.net.state_dict().items())
         self.assertTrue(moved)
