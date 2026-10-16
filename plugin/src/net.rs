@@ -152,10 +152,18 @@ fn spawn_receiver(s: Arc<UdpSocket>, pc_ip: Option<IpAddr>) -> bool {
         let mut rx = InputReceiver::new();
         let mut buf = [0u8; 64];
         let mut first = true;
+        // The Switch reports some receive problems as a bare "os error 1".
+        // Nothing here is fatal: log it (first time, then at 2, 4, 8, ...),
+        // back off a little, and keep trying.
+        let mut errors = 0u32;
+        let mut in_a_row = 0u32;
+        let mut noted_timeout_error = false;
+        let mut dropped_timeout = false;
         while SOCKET_GEN.load(Ordering::Relaxed) == gen {
             let t = Instant::now();
             match s.recv_from(&mut buf) {
                 Ok((n, from)) => {
+                    in_a_row = 0;
                     if first {
                         first = false;
                         log::log(format!("first packet from the PC: {from}"));
@@ -166,21 +174,39 @@ fn spawn_receiver(s: Arc<UdpSocket>, pc_ip: Option<IpAddr>) -> bool {
                         input::SHARED.rejected.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                // Timeouts, and Windows-style "port unreachable" bounces off a
-                // closed bridge. Back off a little if they come back instantly
-                // so a misbehaving socket can't spin this thread.
-                Err(e) if matches!(
-                    e.kind(),
-                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::ConnectionReset | ErrorKind::ConnectionRefused
-                ) => {
-                    if t.elapsed() < Duration::from_millis(1) {
-                        sleep(Duration::from_millis(1));
-                    }
-                }
                 Err(e) => {
-                    log::log(format!("inputs off: UDP receive failed: {e} ({:?})", e.kind()));
-                    input::RECEIVING.store(false, Ordering::Relaxed);
-                    return;
+                    let took = t.elapsed();
+                    let usual = matches!(
+                        e.kind(),
+                        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::ConnectionReset | ErrorKind::ConnectionRefused
+                    );
+                    // A receive that waited out the timeout is a timeout,
+                    // whatever error code it came back with.
+                    if usual || took >= RECV_TIMEOUT * 3 / 4 {
+                        if !usual && !noted_timeout_error {
+                            noted_timeout_error = true;
+                            log::log(format!("receive timeouts come back as \"{e}\" here, treating them as timeouts"));
+                        }
+                        if took < Duration::from_millis(1) {
+                            sleep(Duration::from_millis(1));
+                        }
+                        continue;
+                    }
+                    errors += 1;
+                    in_a_row += 1;
+                    if errors.is_power_of_two() {
+                        log::log(format!(
+                            "receive error #{errors}: {e} ({:?}) after {took:?}, local addr {:?}, retrying",
+                            e.kind(),
+                            s.local_addr().map(|a| a.to_string()).unwrap_or_else(|e| format!("? ({e})"))
+                        ));
+                    }
+                    if in_a_row == 200 && !dropped_timeout {
+                        dropped_timeout = true;
+                        let r = s.set_read_timeout(None);
+                        log::log(format!("200 receive errors in a row, trying without a read timeout: {r:?}"));
+                    }
+                    sleep(Duration::from_millis(5));
                 }
             }
         }
@@ -224,8 +250,10 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
         };
         let sock = Arc::new(sock);
         SOCKET_GEN.fetch_add(1, Ordering::Relaxed);
-        let receiving = spawn_receiver(Arc::clone(&sock), pc_ip);
-        input::RECEIVING.store(receiving, Ordering::Relaxed);
+        // Started after the first heartbeat is sent: the socket may not
+        // have a local port until it has sent something.
+        let mut receiving = false;
+        let mut rx_started = false;
         log::log(format!("streaming to {target}"));
         let mut next_heartbeat = Instant::now();
         let mut next_log_resend = Instant::now();
@@ -283,6 +311,11 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
                     break;
                 }
                 seq = seq.wrapping_add(1);
+                if !rx_started {
+                    rx_started = true;
+                    receiving = spawn_receiver(Arc::clone(&sock), pc_ip);
+                    input::RECEIVING.store(receiving, Ordering::Relaxed);
+                }
             }
         }
         input::RECEIVING.store(false, Ordering::Relaxed);
