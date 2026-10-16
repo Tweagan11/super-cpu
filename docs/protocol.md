@@ -12,7 +12,7 @@ PC to plugin: the plugin sends from one socket with a random port and receives i
 | --- | --- | --- |
 | magic | 4 bytes | `SCPU` |
 | proto_version | u16 | currently 3 |
-| kind | u16 | 1 = state, 2 = input, 3 = heartbeat, 4 = ack, 5 = control status |
+| kind | u16 | 1 = state, 2 = input, 3 = heartbeat, 4 = ack, 5 = control status, 6 = log, 7 = scene, 8 = menu press |
 | seq | u32 | per sender, wraps at 2^32 |
 
 12 bytes. Code: `plugin/src/net.rs`, `bridge/bridge/wire.py`.
@@ -225,6 +225,33 @@ println output on every setup. `udp_listen` and `bridge.run` print them as
 New lines go out right away, and the last 24 are resent every 5 s so a
 listener started after boot still sees them. The PC prints each id once and
 forgets the ids when the heartbeat's uptime goes backwards (plugin restart).
+
+## Scene (kind 7, plugin to PC) - built (SSB-25)
+
+The scene the game is on, from the scene-change hook (`plugin/src/scene.rs`, `menu_hook.rs`). Sent when the scene changes and every second. 60 bytes. No version bump: nothing older sends or expects it, and no existing layout changed.
+
+| Offset | Type | Field |
+| --- | --- | --- |
+| 12 | u32 | changes: scene changes seen since the plugin booted |
+| 16 | u32 | flags: bit 0 scene hook installed, bit 1 `auto_menu` on and the controller hook installed |
+| 20 | u32 | menu_applied: frames on which a menu press was written, since boot |
+| 24 | u32 | menu_last_seq: press seq of the last applied press, 0xFFFFFFFF if none |
+| 28 | 32 bytes | scene name, NUL padded, cut at 32 bytes |
+
+Scene names are the game's own (`CharaSelectScene`, `StageSelectScene`, ...); the match and results names are unknown until experiment E1 (`docs/css-research.md`). The name is empty until the first scene change after the plugin loads.
+
+## Menu press (kind 8, PC to plugin) - built (SSB-25)
+
+Asks the plugin to press controller buttons that menus read (not the mapped inputs of kind 2). 24 bytes. Only acted on with `auto_menu = true` in `config.toml`, only outside matches, and only on the bot port's controller (`hooks.md` section 5). Handled on the receive thread (`plugin/src/menu.rs`); kind 2 handling is untouched.
+
+| Offset | Type | Field |
+| --- | --- | --- |
+| 12 | u32 | press seq: the PC's own counter. A press whose seq isn't newer than the last one is ignored (duplicate or late), a newer one replaces a running press |
+| 16 | u32 | button mask, the game's `Controller` ButtonBitfield: A 0x20, B 0x40, X 0x10, Y 0x80, + 0x40000, - 0x80000 (`bridge/bridge/menu_buttons.py`) |
+| 20 | u16 | hold frames, 1 to 120 (0 counts as 1) |
+| 22 | u16 | reserved, 0 |
+
+The plugin pulses the press: the button is down on the first frame, then up for two, again and again until `hold frames` have passed. So 1 is a single press, 4 is two. Held buttons often don't register as a fresh press in menus, which is why. A running press is dropped when a match scene starts.
 
 ## Golden bytes
 

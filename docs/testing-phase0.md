@@ -255,6 +255,56 @@ On the Switch:
 
 Known quirks to expect, not bugs: frame 0 of a match; a few rows in hitlag where the CPU holds its last input; `GUARD_HOLD`/`*_RAW` bits may differ between sources and are ignored by the agreement check.
 
+## 11. Scenes and unattended rematches (SSB-25)
+
+Adds the scene packet (kind 7), menu presses (kind 8) and `bridge.run --auto-rematch`. Rebuild and recopy the `.nro`. No existing packet changed.
+
+### 11a. PC side first, no Switch
+
+```
+python -m bridge.run --policy walk --auto-rematch --idle-timeout 30
+python -m bridge.fake_switch --matches 3 --match-seconds 4 --menus
+```
+
+Expect `[run] scene: 'MeleeScene'`, then after each match `scene: 'ResultScene'`, an `[rematch] A on 'ResultScene', press 1/12` line, `scene: 'CharaSelectScene'`, `[rematch] + on ...`, and the next match. Add `--menu-ignore 1` to the fake and watch it retry with a longer wait. `python -m bridge.udp_listen` prints `[listen] scene: ...` lines instead.
+
+### 11b. E1: scene names on the Switch (no presses yet)
+
+`auto_menu` stays off (the default). Start `python -m bridge.udp_listen`, boot the game, and walk a full loop by hand: main menu, Smash, CSS, stage select, play a match to the end, results, back to the CSS.
+
+| Where | Expect |
+| --- | --- |
+| Boot | `[switch] scene hook installed at text+0x3726120`, `auto_menu off` |
+| Every screen change | `[switch] scene #n: "A" -> "B" (leaving arg "...")` and `[listen] scene: 'B' (change #n, menu hook off, ...)` |
+
+Write down the exact names of the CSS, match and results scenes. If they don't contain the defaults in `bridge/bridge/scenes.py` (`CharaSelect`, `Melee`, `Result`), fix them there or pass `--css-scene`, `--match-scene`, `--results-scene` to `bridge.run`; the plugin's own match check (`scene.rs`, "melee" and not "result") needs the same fix. Also note whether a rematch goes results to CSS directly, and whether a stage select scene sits in between (that screen needs its own press, which this does not do: skip it with the ruleset or make the cursor start on the right stage, see `css-research.md`). No scene lines at all means the offset or the hook is wrong for this build: send the boot log.
+
+### 11c. Menu presses (auto_menu = true)
+
+Set `auto_menu = true` in `config.toml` and boot. Expect `auto_menu on: controller hook at text+0x36650c0, bot npad N` and `controller update: style S npad N id I` lines: write down which (style, npad) combos show up and whether the bot port's controller is one of them. If the game crashes on boot or at the first menu, set `auto_menu` back to false and send the crash report (the hook prototype is the top risk, `hooks.md` section 5).
+
+Then run `python -m bridge.run --policy walk --auto-rematch` and finish a match. The `[rematch]` lines say what it pressed; `[run] scene:` shows `menu pulses applied` climbing.
+
+| Do this | Expect |
+| --- | --- |
+| Finish a match with the bridge running | The results screen goes on to the CSS with no controller touched |
+| On the CSS | `+` starts the next match, no more presses once it did |
+| A press that doesn't land | Retries after 1.6 s, 2.6 s, 4.1 s, up to 12 presses, then `giving up` |
+| During a match | No presses, `menu pulses applied` stays flat |
+| The other port's controller | Doesn't react |
+
+If A does nothing on the results screen, set `PRESS_HOLD_FRAMES` to 4 in `bridge/bridge/rematch.py` (two pulses). If + doesn't start the match, the CSS probably needs its picks set first (README item 4).
+
+### 11d. Unattended 3-match run
+
+With the names fixed, the cards set up, and the stage select skipped or settled:
+
+```
+python -m bridge.run --policy scripted --log --eval 3 --model scripted --auto-rematch --min-seconds 5
+```
+
+Start the first match by hand and walk away. Expect 3 `[log] wrote` lines and 3 `[eval] game` lines, with only a handful of `[rematch]` lines per screen. Anything stuck for over a minute is a wrong scene name or an unpressed screen: look at the last `[run] scene:` line.
+
 ## If nothing shows up
 
 | Symptom | Likely cause |

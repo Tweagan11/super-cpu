@@ -177,6 +177,10 @@ fn spawn_receiver(s: Arc<UdpSocket>, pc_ip: Option<IpAddr>) -> bool {
                         log::log(format!("first packet from the PC: {from}"));
                     }
                     if pc_ip.map_or(true, |ip| ip == from.ip()) {
+                        if n >= 8 && u16::from_le_bytes([buf[6], buf[7]]) == crate::menu::KIND_MENU {
+                            crate::menu::handle_packet(&buf[..n]);
+                            continue;
+                        }
                         rx.handle(&input::SHARED, &buf[..n], input::now_ms(), LIVE_FRAME.load(Ordering::Relaxed));
                     } else {
                         input::SHARED.rejected.fetch_add(1, Ordering::Relaxed);
@@ -237,6 +241,7 @@ const RECV_TIMEOUT: Duration = Duration::from_millis(20);
 const SLOW_SEND: Duration = Duration::from_millis(4);
 const SEND_REPORT_EVERY: Duration = Duration::from_secs(10);
 const LOG_RESEND_EVERY: Duration = Duration::from_secs(5);
+const SCENE_EVERY: Duration = Duration::from_secs(1);
 
 /// Runs forever on its own thread: forwards each finished frame as a state
 /// packet, sends a heartbeat (plus a control status packet) every 500 ms,
@@ -266,6 +271,8 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
         log::log(format!("streaming to {target}"));
         let mut next_heartbeat = Instant::now();
         let mut next_log_resend = Instant::now();
+        let mut next_scene = Instant::now();
+        let mut scene_sent = u32::MAX;
         let mut logs_sent = 0u32;
         // Send timing, reported every SEND_REPORT_EVERY when any send was slow:
         // tells whether sends ever wait on the blocked receive.
@@ -310,6 +317,23 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
                 }
                 seq = seq.wrapping_add(1);
                 logs_sent = logs_sent.max(id + 1);
+            }
+            // Scene packet (kind 7): on change, and every second.
+            let sc = crate::scene::snapshot();
+            if sc.changes != scene_sent || Instant::now() >= next_scene {
+                scene_sent = sc.changes;
+                next_scene = Instant::now() + SCENE_EVERY;
+                let pkt = crate::scene::scene_packet(
+                    seq,
+                    &sc,
+                    crate::menu_hook::flags(),
+                    crate::menu::APPLIED.load(Ordering::Relaxed),
+                    crate::menu::APPLIED_SEQ.load(Ordering::Relaxed),
+                );
+                if !send(&sock, &pkt, &target) {
+                    break;
+                }
+                seq = seq.wrapping_add(1);
             }
             if Instant::now() >= next_send_report {
                 next_send_report = Instant::now() + SEND_REPORT_EVERY;

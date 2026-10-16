@@ -24,11 +24,13 @@ from .wire import (
     KIND_CONTROL_STATUS,
     KIND_HEARTBEAT,
     KIND_LOG,
+    KIND_SCENE,
     KIND_STATE,
     Header,
     Heartbeat,
     unpack_control_status,
     unpack_log,
+    unpack_scene,
     unpack_header,
     unpack_heartbeat,
     unpack_state,
@@ -194,6 +196,7 @@ class MatchObserver(Protocol):
     def on_match_start(self, ev: MatchStarted) -> None: ...
     def on_frame(self, frame: Frame, seq: int, now: float) -> None: ...
     def on_match_end(self, ev: MatchEnded) -> None: ...
+    # optional: def on_scene(self, scene: wire.SceneInfo, now: float) -> None
 
 
 class MatchWatcher:
@@ -213,6 +216,7 @@ class MatchWatcher:
         self.boundary = MatchBoundary(timeout)
         self.observers = list(observers)
         self.bot_port = bot_port
+        self.scene = None  # latest wire.SceneInfo
 
     def _emit(self, name: str, *args) -> None:
         for obs in self.observers:
@@ -237,8 +241,8 @@ class MatchWatcher:
     def packet(self, buf: bytes, now: float) -> tuple[Header, object]:
         """Decode one raw UDP packet and route it. Raises wire.BadPacket.
 
-        Returns the header and the decoded Heartbeat, Frame or ControlStatus
-        (None for other kinds).
+        Returns the header and the decoded Heartbeat, Frame, ControlStatus,
+        LogLine or SceneInfo (None for other kinds).
         """
         header = unpack_header(buf)
         if header.kind == KIND_HEARTBEAT:
@@ -255,6 +259,11 @@ class MatchWatcher:
             return header, st
         if header.kind == KIND_LOG:
             return header, unpack_log(buf)
+        if header.kind == KIND_SCENE:
+            scene = unpack_scene(buf)
+            self.scene = scene
+            self._emit("on_scene", scene, now)
+            return header, scene
         return header, None
 
     def poll(self, now: float) -> MatchEnded | None:
