@@ -76,6 +76,10 @@ STATE_FIELDS = [
     "status_kind", "motion_kind", "anim_frame", "facing", "jumps_left", "flags",
 ]
 
+# A port with FIM capture on fewer than this share of its ControlModule rows
+# is a CPU (no controller): its inputs come from the ControlModule read.
+CPU_FIM_FRACTION = 0.05
+
 DEFAULT_RULESET = {"stocks": 3, "items": False, "time_limit_min": None}
 DEAD_STATUS = 181  # FIGHTER_STATUS_KIND_DEAD
 
@@ -379,13 +383,22 @@ class MatchLogger:
         filled_cm = [0, 0]
         agree = []
         for port in range(N_PORTS):
-            fill = cm_mask[:, port] & (players["input_valid"][:, port] == 0)
+            both = cm_mask[:, port] & fim_mask[:, port]
+            agree.append(agreement(players[both][:, port], cm_arr[both][:, port], encode))
+            # A CPU's real inputs are its ControlModule read. A CPU port gets
+            # only a handful of FIM rows (match start, a bridge sending inputs
+            # to a port with no controller), which aren't what it played, so
+            # CM wins there. Decided from the data: the controller label is
+            # only a default (cpu:9 even for a human opponent).
+            cpu_like = fim_mask[:, port].sum() < CPU_FIM_FRACTION * max(1, cm_mask[:, port].sum())
+            if cpu_like:
+                fill = cm_mask[:, port]
+            else:
+                fill = cm_mask[:, port] & (players["input_valid"][:, port] == 0)
             for name in INPUT_FIELDS:
                 players[name][fill, port] = cm_arr[name][fill, port]
             players["input_valid"][fill, port] = 1
             filled_cm[port] = int(fill.sum())
-            both = cm_mask[:, port] & fim_mask[:, port]
-            agree.append(agreement(players[both][:, port], cm_arr[both][:, port], encode))
         sources = []
         for port in range(N_PORTS):
             used = [name for name, k in (("ack", from_acks[port]), ("fim", captured[port]),
