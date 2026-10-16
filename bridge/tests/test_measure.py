@@ -8,6 +8,7 @@ from bridge.statuses import STATUS_NAMES
 from tests.helpers import fighter, frame
 
 CLIFF = next(k for k, v in STATUS_NAMES.items() if v.startswith("CLIFF"))
+DEAD = next(k for k, v in STATUS_NAMES.items() if v == "DEAD")
 
 
 class MeasureTests(unittest.TestCase):
@@ -21,7 +22,7 @@ class MeasureTests(unittest.TestCase):
             nonlocal n
             for _ in range(count):
                 f = replace(fighter(), pos_x=x, pos_y=y, flags=0, **kw)
-                m.on_frame(frame(n, bot=f, opp=replace(f, stocks=0), stage_id=STAGE_ID_BATTLEFIELD), n, 0.0)
+                m.on_frame(frame(n, bot=f, opp=replace(f, status_kind=DEAD), stage_id=STAGE_ID_BATTLEFIELD), n, 0.0)
                 n += 1
 
         stand(-70.0, 0.0)
@@ -45,7 +46,26 @@ class MeasureTests(unittest.TestCase):
         out: list[str] = []
         m = StageMeasurer(echo=out.append)
         self.assertIsNone(m.report())
-        self.assertIn("not enough", out[0])
+        self.assertIn("no fighter frames", out[0])
+
+
+class TrainingModeTests(unittest.TestCase):
+    def test_zero_stocks_still_measured(self):
+        """Training mode and timed matches report 0 stocks; those frames still count."""
+        out: list[str] = []
+        m = StageMeasurer(echo=out.append)
+        m.on_match_start(MatchStarted(frame(0), 0.0))
+        for n, x in enumerate([-80.0] * 12 + [80.0] * 12):
+            f = replace(fighter(), pos_x=x, pos_y=0.0, flags=0, stocks=0)
+            m.on_frame(frame(n, bot=f, opp=f), n, 0.0)
+        self.assertIsNotNone(m.report())
+
+    def test_explains_skips(self):
+        out: list[str] = []
+        m = StageMeasurer(echo=out.append)
+        m.on_match_start(MatchStarted(frame(0), 0.0))
+        self.assertIsNone(m.report())
+        self.assertIn("no fighter frames", out[-1])
 
 
 if __name__ == "__main__":

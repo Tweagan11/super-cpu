@@ -25,6 +25,11 @@ from .statuses import STATUS_NAMES
 
 # Hanging on the ledge counts as "not airborne" for some statuses; skip them.
 CLIFF_STATUSES = frozenset(k for k, v in STATUS_NAMES.items() if v.startswith("CLIFF"))
+# Not really on the stage: KO'd, respawn platform, entry animation, eliminated.
+# (Stocks aren't used: training mode and timed matches report 0 stocks.)
+OFFSTAGE_STATUSES = frozenset(
+    k for k, v in STATUS_NAMES.items() if v in ("DEAD", "REBIRTH", "ENTRY", "STANDBY")
+)
 # Surfaces closer than this (game units) count as the same height.
 HEIGHT_BUCKET = 2.0
 # A surface needs this many standing frames to count (filters one-frame noise).
@@ -56,12 +61,16 @@ class StageMeasurer:
     echo: object = print
     surfaces: dict[int, Surface] = field(default_factory=lambda: defaultdict(Surface))
     stage_id: int | None = None
+    seen: int = 0
+    skipped: dict[str, int] = field(default_factory=lambda: defaultdict(int))
 
     def on_heartbeat(self, hb) -> None:
         pass
 
     def on_match_start(self, ev: MatchStarted) -> None:
         self.surfaces = defaultdict(Surface)
+        self.seen = 0
+        self.skipped = defaultdict(int)
         self.stage_id = ev.first.stage_id
         self.echo(
             f"[measure] measuring {stage_name(self.stage_id)}: walk to both edges "
@@ -70,7 +79,15 @@ class StageMeasurer:
 
     def on_frame(self, frame: Frame, seq: int, now: float) -> None:
         for f in (frame.bot, frame.opponent):
-            if f.airborne or f.status_kind in CLIFF_STATUSES or f.stocks == 0:
+            self.seen += 1
+            if f.airborne:
+                self.skipped["airborne"] += 1
+                continue
+            if f.status_kind in CLIFF_STATUSES:
+                self.skipped["on ledge"] += 1
+                continue
+            if f.status_kind in OFFSTAGE_STATUSES:
+                self.skipped["dead/respawn/entry"] += 1
                 continue
             self.surfaces[round(f.pos_y / HEIGHT_BUCKET)].add(f.pos_x, f.pos_y)
 
@@ -82,7 +99,17 @@ class StageMeasurer:
             (s for s in self.surfaces.values() if s.frames >= MIN_FRAMES), key=lambda s: s.y
         )
         if not found:
-            self.echo("[measure] not enough standing frames to measure anything yet")
+            if not self.seen:
+                self.echo(
+                    "[measure] no fighter frames received at all. Is the listener showing frames? "
+                    "(Old .nro shows 'protocol v2, expected v3': rebuild and recopy.)"
+                )
+            else:
+                why = ", ".join(f"{k} {v}" for k, v in self.skipped.items()) or "none"
+                self.echo(
+                    f"[measure] not enough standing frames yet: {self.seen} fighter frames, "
+                    f"skipped: {why}"
+                )
             return None
         # The main stage is the widest surface; platforms are the ones above it.
         ground = max(found, key=lambda s: s.right - s.left)
