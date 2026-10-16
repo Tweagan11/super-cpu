@@ -15,6 +15,9 @@
 //! - SSB-25: reports the current scene (packet kind 7) and, with
 //!   `auto_menu = true`, presses menu buttons for the PC (kind 8)
 //!   (`scene.rs`, `menu.rs`, `menu_hook.rs`)
+//! - SSB-24: with `force_fighter = true`, forces green R.O.B. onto the
+//!   configured ports by writing the game's decided-fighter record
+//!   (`force.rs`, `force_hook.rs`), and checks it in the match
 //! - SSB-10 (game version half): no state packets on a mismatched build
 //!   (`version.rs`)
 //!
@@ -24,6 +27,8 @@
 
 mod config;
 mod control;
+mod force;
+mod force_hook;
 mod frame;
 mod input;
 mod log;
@@ -67,6 +72,7 @@ pub fn main() {
     frame::install();
     control::install(cfg.cpu_probe);
     menu_hook::install(cfg.bot_port as u32 - 1, cfg.auto_menu);
+    force_hook::install(cfg.force_fighter, &cfg.force_ports, cfg.force_costume, cfg.force_copy_hook);
 
     // Networking never runs on the game thread.
     std::thread::spawn(move || net::run(cfg, rx, ack_rx, health));

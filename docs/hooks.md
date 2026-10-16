@@ -79,6 +79,42 @@ Risks, in the order I'd expect them to bite:
 - **Other mods.** ARCropolis and HDR hook the same functions. Skyline hooks chain, but the order depends on load order.
 - **Licenses.** HDR is AGPL and ARCropolis GPL: offsets and struct layouts only, no code copied.
 
+## 6. Forced fighter: green R.O.B. without a cursor (SSB-24)
+
+Two more fixed `.text` offsets for 13.0.4 from `docs/css-research.md` (HDR-1304 `chara_select/random.rs`). Only installed on 13.0.4 and only with `force_fighter = true`. Code: `plugin/src/force_hook.rs`, decisions in `force.rs`.
+
+| Hook | Offset | What it does |
+| --- | --- | --- |
+| Set random fighter data | `0x1a0d540` | `base` is the per-player decided-fighter record. `*base as u8` is the 1-based port (HDR: `(*base as u8) - 1` is the player id), word 3 (`base[3]`) holds the ui_chara hash in its low 40 bits, the byte at `base + 0x20` is the costume. For a port in `force_ports`: `base[3] = hash40("ui_chara_robot") \| (base[3] & KEY_MASK)` and `costume = force_costume`, written before and after the original, as HDR does |
+| Record copy (inline) | `0x1798ac8` | HDR copies words 2 to 4 from `x0` to `x1` here so the choice reaches the match. We write the same two fields into the source record (`x0`) before the copy runs. Skip it with `force_copy_hook = false` |
+
+Config (all in `config.toml`, template has them commented out):
+
+```toml
+force_fighter = true      # default false
+force_ports = [2]         # 1-based; "2,3" also works; include the opponent CPU's port to force it too
+force_costume = 5         # 0 to 15, green R.O.B. is 5
+force_copy_hook = true    # default true
+```
+
+Only the hash (keeping the top 24 bits of the word) and the costume byte are written; everything else in the record is left alone. Pointers are null and alignment checked and the port byte has to be a forced one.
+
+**Logging** (all `[switch]` lines on the PC):
+
+- `force pre|post|copy: P2 saw hash 0x... c03 raw w0 .. w2 .. w4 ..; wrote hash 0x0e18857219 c05` on every fire for the first 12 fires per port, then only when what was seen changes. This is the E5 answer: does it fire, and what does a CPU card (or Random) look like.
+- `force pre|post|copy dump P2 before: <0x30 bytes hex>` the first 4 times per phase, before our write.
+- `force check: P2 robot c05 OK` once per fighter when a match starts. `MISMATCH want robot c05, got kind 12 c03` if the fighter or costume differs (`fighter_kind` 0x2D is R.O.B.; costume is `FIGHTER_INSTANCE_WORK_ID_INT_COLOR`). `NOT FORCED, hook never fired for it before this match` if the hook didn't run for that port since the last check. The in-match check covers ports 1 and 2 only, the two entries the state reader sees.
+
+Risks, in the order I'd expect them to bite:
+
+- **Prototype of `0x1a0d540` is unverified.** The doc gives the record layout, not the signature. The hook takes `(base, a1, a2, a3)` and forwards all four and the return value. If the first argument isn't the record pointer, the port byte won't match a forced port and nothing is written, which shows up as no `force` lines at all.
+- **Hash word 2 vs 3.** The doc's table calls `base[2]` the main chara key and `base[3]` the sub key, but its recipe (which we follow) writes `base[3]`. If `force check` says MISMATCH with the hash sitting in `w2` in the dump, the main key is the one that counts. The dump has the evidence either way.
+- **Does it fire for a CPU card?** E5. Unknown whether the function runs for a card that isn't on Random, or runs at all for a CPU. A non-Random pick may be decided elsewhere. Step 12 tests all three.
+- **Copy hook semantics.** We assume `x0` is the source and has the same layout as `base`. If the copy hook misfires, `force_copy_hook = false` removes it. It is an inline hook, so a bad address would crash at boot, not at match time.
+- **Cosmetic.** The CSS or results screen may still show Random or the old portrait (the reason HDR needed the copy hook).
+- **Other mods.** HDR and ARCropolis hook nearby functions. Skyline chains hooks but order follows load order.
+- **Licenses.** HDR is AGPL and ARCropolis GPL: offsets and struct layouts only, no code copied.
+
 ## Open questions only hardware can answer
 
 | Question | Why it matters | How to check |
