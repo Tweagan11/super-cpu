@@ -123,7 +123,9 @@ unsafe fn on_controller_update(ctrl: *mut Controller, a1: u64, a2: u64, a3: u64)
     if c.npad_number != target {
         return ret;
     }
-    if !scene::menu_presses_allowed() || crate::state::live_frame().is_some() {
+    let allowed = scene::menu_presses_allowed() && crate::state::live_frame().is_none();
+    note_menu_state(allowed, c.npad_number);
+    if !allowed {
         menu::cancel();
         return ret;
     }
@@ -132,6 +134,34 @@ unsafe fn on_controller_update(ctrl: *mut Controller, a1: u64, a2: u64, a3: u64)
         c.just_down |= mask;
     }
     ret
+}
+
+/// Logs, once per scene, whether a waiting press was held back (and why) or
+/// applied, so a menu that doesn't move can be told apart from one that
+/// ignores the press.
+fn note_menu_state(allowed: bool, npad: u32) {
+    use std::sync::atomic::AtomicU64;
+    // (scene change count << 1) | allowed, for the last line logged
+    static LAST: AtomicU64 = AtomicU64::new(u64::MAX);
+    if !menu::pending() {
+        return;
+    }
+    let s = scene::snapshot();
+    let key = ((s.changes as u64) << 1) | allowed as u64;
+    if LAST.swap(key, Ordering::Relaxed) == key {
+        return;
+    }
+    if allowed {
+        crate::log::log(format!("menu: pressing on npad {npad} in {:?}", s.name()));
+    } else {
+        crate::log::log(format!(
+            "menu: press held in {:?}: match scene {}, fighter frames live {}, last frame zero stocks {}",
+            s.name(),
+            scene::is_match_scene(&s.name()),
+            crate::state::live_frame().is_some(),
+            crate::state::last_zero_stocks()
+        ));
+    }
 }
 
 /// `npad` is the controller that gets menu presses (None: lowest connected),

@@ -121,6 +121,11 @@ pub fn next_pulse() -> Option<u32> {
     Some(mask)
 }
 
+/// Game thread: is a press waiting to be applied? (never waits on the lock)
+pub fn pending() -> bool {
+    PRESSER.try_lock().map_or(false, |p| p.active())
+}
+
 /// Game thread: forget the running press (never waits on the lock).
 pub fn cancel() {
     if let Ok(mut p) = PRESSER.try_lock() {

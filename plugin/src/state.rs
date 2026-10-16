@@ -97,10 +97,16 @@ static FIGHTER_MANAGER: AtomicUsize = AtomicUsize::new(0);
 /// the first frames of a match too, but fighter frames are live then.)
 static LAST_ZERO_STOCKS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// True after a stock match ended (someone at 0 stocks) and no fighter frame
-/// ran for 250 ms: the victory/results screen, still in the match scene.
+/// True when no fighter frame ran for 250 ms: in the match scene that's the
+/// victory screen (or a pause). The PC only sends presses after a match ended
+/// with a fighter out of stocks (rematch.py), so a pause never gets one.
 pub fn match_over() -> bool {
-    LAST_ZERO_STOCKS.load(Ordering::Relaxed) && live_frame().is_none()
+    live_frame().is_none()
+}
+
+/// For the menu log: did the last gameplay frame have a fighter at 0 stocks?
+pub fn last_zero_stocks() -> bool {
+    LAST_ZERO_STOCKS.load(Ordering::Relaxed)
 }
 
 /// A gap this long with no fighter frames means the next frame is a new match.
