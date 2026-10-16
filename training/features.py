@@ -424,23 +424,58 @@ def _content_key(m: LoadedMatch) -> str:
     return h.hexdigest()
 
 
+def valid_input_mask(m: LoadedMatch, slot: int, include_inferred: bool = False) -> np.ndarray:
+    """Rows of port `slot` (1-based) whose inputs may be used as labels.
+    Recorded rows (input_valid = 1) always; rows predicted by an IDM
+    (`m.inferred`, see idm.py) only with include_inferred."""
+    ok = m.port(slot)["input_valid"] == 1
+    if include_inferred and m.inferred is not None:
+        ok = ok | m.inferred[:, slot - 1]
+    return ok
+
+
+def drop_derived_duplicates(loaded: list[LoadedMatch], include_inferred: bool) -> list[LoadedMatch]:
+    """A labeled copy (`derived_from` in its header) holds the same frames as
+    its raw log. When both are loaded keep only one: the copy if inferred rows
+    are wanted, else the raw log. A copy whose raw log isn't loaded stays."""
+    ids = {m.header.get("match_id") for m in loaded}
+    keep = []
+    for m in loaded:
+        src = m.header.get("derived_from")
+        if src is not None and src in ids and not include_inferred:
+            continue
+        keep.append(m)
+    if include_inferred:
+        wanted = {m.header["derived_from"] for m in keep if m.header.get("derived_from")}
+        keep = [m for m in keep if m.header.get("match_id") not in wanted or m.header.get("derived_from")]
+    return keep
+
+
+def load_all(matches, expect_version, expect_mod_hash, include_inferred: bool) -> list[LoadedMatch]:
+    """Load (paths get the version check), drop raw/labeled duplicates, and
+    order by content so the train/val split doesn't depend on file names."""
+    loaded = [m if isinstance(m, LoadedMatch) else load_match(m, expect_version, expect_mod_hash) for m in matches]
+    if not loaded:
+        raise ValueError("no matches")
+    loaded = drop_derived_duplicates(loaded, include_inferred)
+    loaded.sort(key=_content_key)
+    return loaded
+
+
 def build_dataset(
     matches: Sequence[LoadedMatch | str | Path],
     cfg: FeatureConfig = FeatureConfig(),
     max_delay: int = 4,
     expect_version: str | None = EXPECT_VERSION,
     expect_mod_hash: str | None = None,
+    include_inferred: bool = False,
 ) -> BCDataset:
     """Load matches (paths are loaded with expect_version, so wrong builds are
-    rejected with LogRejected) and index them for training."""
-    loaded = [m if isinstance(m, LoadedMatch) else load_match(m, expect_version, expect_mod_hash) for m in matches]
-    if not loaded:
-        raise ValueError("no matches")
-    # Order matches by their content, not their file names. Match ids carry a
-    # random suffix, so name order changes between runs, and split_by_match
-    # splits by position: without this, the same data and seed gave a
-    # different train/val split every run.
-    loaded.sort(key=_content_key)
+    rejected with LogRejected) and index them for training. Rows whose inputs
+    were predicted by an IDM (idm.py label) are left out unless include_inferred."""
+    loaded = load_all(matches, expect_version, expect_mod_hash, include_inferred)
+    # (load_all ordered matches by content, not file name: ids carry a random
+    # suffix and split_by_match splits by position.)
     keys, starts, sids, pls, midx, labels, ids = [], [], [], [], [], [], []
     offset = 0
     for i, m in enumerate(loaded):
@@ -455,7 +490,7 @@ def build_dataset(
         midx.append(np.full(n, i, np.int64))
         p = m.port(cfg.bot_port)
         lab = np.stack(A.encode_arrays(p["stick_x"], p["stick_y"], p["cstick_x"], p["cstick_y"], p["buttons"]), axis=1)
-        lab[p["input_valid"] == 0] = -1
+        lab[~valid_input_mask(m, cfg.bot_port, include_inferred)] = -1
         labels.append(lab)
         ids.append(m.header.get("match_id", str(i)))
         offset += n
