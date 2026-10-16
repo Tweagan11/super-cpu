@@ -8,7 +8,7 @@
 
 use std::io::ErrorKind;
 use std::net::{IpAddr, UdpSocket};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread::sleep;
@@ -132,6 +132,9 @@ fn send(sock: &UdpSocket, packet: &[u8], target: &str) -> bool {
 /// The state frame the game is on, for filing inputs. Written by the send
 /// loop, read by the receive thread.
 static LIVE_FRAME: AtomicU32 = AtomicU32::new(0);
+/// Set once any packet from the PC arrives. After that, log lines are no
+/// longer resent in bursts (a running bridge has already seen them).
+static PC_SEEN: AtomicBool = AtomicBool::new(false);
 /// Bumped on every rebind so an old receive thread knows to quit.
 static SOCKET_GEN: AtomicU32 = AtomicU32::new(0);
 
@@ -166,6 +169,7 @@ fn spawn_receiver(s: Arc<UdpSocket>, pc_ip: Option<IpAddr>) -> bool {
                     in_a_row = 0;
                     if first {
                         first = false;
+                        PC_SEEN.store(true, Ordering::Relaxed);
                         log::log(format!("first packet from the PC: {from}"));
                     }
                     if pc_ip.map_or(true, |ip| ip == from.ip()) {
@@ -291,7 +295,8 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
             }
             // New log lines go out right away; the whole recent set again
             // every few seconds, so a listener started late still sees boot.
-            let resend = Instant::now() >= next_log_resend;
+            // (Not while a bridge is talking to us: no bursts during play.)
+            let resend = Instant::now() >= next_log_resend && !PC_SEEN.load(Ordering::Relaxed);
             if resend {
                 next_log_resend = Instant::now() + LOG_RESEND_EVERY;
             }
