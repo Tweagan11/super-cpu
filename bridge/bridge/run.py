@@ -454,6 +454,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="score N games (EvalSession) and add a row to eval/results.csv, then stop")
     ap.add_argument("--model", default=None, help="model name for the logs and eval row (default: the policy)")
     ap.add_argument("--opponent", default="cpu9", help="who's on the other port: cpu9 or a player name")
+    ap.add_argument("--controllers", default=None, metavar="P1,P2",
+                    help="override who's logged on each port, e.g. cpu:9,cpu:9 for CPU vs CPU data collection")
     ap.add_argument("--stage", default="fd", help="fallback layout when the stage id is not Battlefield or FD/Omega")
     ap.add_argument("--stocks", type=int, default=3, help="stock count set in the game's rules (recorded in the logs)")
     ap.add_argument("--platform", default="switch", choices=("switch", "emulator"))
@@ -495,6 +497,10 @@ def main(argv: list[str] | None = None) -> int:
         controllers = ["", ""]
         controllers[args.bot_port - 1] = f"bot:{model}"
         controllers[2 - args.bot_port] = "cpu:9" if args.opponent == "cpu9" else args.opponent
+        if args.controllers:
+            controllers = [c.strip() for c in args.controllers.split(",")]
+            if len(controllers) != 2:
+                ap.error("--controllers takes two names, e.g. cpu:9,cpu:9")
         logger = MatchLogger(
             out_dir=args.log or None, expect_version=args.expect_version, mod_hash=args.mod_hash,
             stage=args.stage, controllers=tuple(controllers),
