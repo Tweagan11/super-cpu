@@ -294,3 +294,9 @@ class AckStatsTests(unittest.TestCase):
         for f in range(0, 100):          # next match: the frame counter restarts
             st.add(Ack(h, f, f + 3, f + 2))
         self.assertEqual(len(st), 1100)
+
+
+class WatchPolicyTests(unittest.TestCase):
+    def test_watch_sends_nothing(self):
+        from bridge.policy import POLICIES
+        self.assertIsNone(POLICIES["watch"]().act([]))

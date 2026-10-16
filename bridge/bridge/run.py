@@ -320,6 +320,8 @@ class Bridge:
         # runs match start (resets history) before the policy sees the frame.
         _, frame = self.watcher.packet(buf, time.monotonic())
         inputs = self.policy.act(self.history.push(frame))
+        if inputs is None:  # --policy watch: never take over the port
+            return
         self.send_input(frame, inputs, addr)
 
     def send_input(self, frame: Frame, inputs, addr: tuple[str, int]) -> None:

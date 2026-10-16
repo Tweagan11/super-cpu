@@ -71,10 +71,20 @@ def _rl() -> Policy:
     return RLPolicy()
 
 
+class WatchPolicy:
+    """Sends nothing, so the game keeps full control of the bot's port. For
+    collecting CPU vs CPU data with --log/--auto-rematch while drive_cpu is
+    on: any input at all would start a PC session and override the CPU."""
+
+    def act(self, history):  # noqa: D401 - Policy protocol
+        return None
+
+
 # Every selectable policy, by the name `--policy NAME` takes. Values are
 # zero-arg factories, so a policy reads its own config (see scripted.py).
 # Add new policies here and nowhere else.
 POLICIES: dict[str, Callable[[], Policy]] = {
+    "watch": WatchPolicy,
     "idle": IdlePolicy,
     "walk": WalkTowardPolicy,
     "scripted": _scripted,
