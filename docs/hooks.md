@@ -153,3 +153,8 @@ Risks, in the order I'd expect them to bite:
 ## Latency on hardware (SSB-7, 2026-10-16, Wi-Fi)
 
 `bridge.latency`, 60 s: round trip median 2 frames, p99 2, max 3, 0 late, 0 lost, 0 of 7433 state packets lost. An earlier run had about 13 stalls of 8+ frames per minute, one per 5 s; they were the plugin resending its log lines in bursts, and went away once that stopped during play. So `bridge.run` defaults to `--delay 3` and training to `--max-delay 4` (one frame of margin on each).
+
+## Hardware results, 2026-10-16 (13.0.4)
+
+- **drive_cpu works in versus**: with port 2 a level 9 CPU card and `drive_cpu = true`, `bridge.run --policy walk` took over the CPU and made it walk. `set_cpu_controls` is called outside training mode.
+- **force_fighter works**: Random on a CPU card becomes green R.O.B. (c05); a fixed pick is left alone. The decided-fighter record matches the research layout: the main ui_chara hash is word 3 (low 40 bits, e.g. `0x0e18857219` robot), word 2 holds another hash (`0x0fd5f7fa78`, unchanged), costume is the byte at `+0x20`. The record is written twice per match start ("pre" then "post"): Random re-rolls in between (seen `0x0d61668319 c06`) and the post write puts R.O.B. c05 back. A record already holding R.O.B. c05 is left as is ("already forced").
