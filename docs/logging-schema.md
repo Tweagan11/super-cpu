@@ -49,7 +49,7 @@ The `.npz` holds three arrays: `header` (the JSON as a 0-d string), `frames`, an
 | `first_frame`, `last_frame` | game frame counter at each end |
 | `frames_skipped` | gaps in the frame counter (dropped packets) |
 | `duration_s` | PC time from first to last frame |
-| `end_reason` | `state_stopped` (normal, results screen), `frame_reset` (next match started with no gap), `interrupted` (PC side shut down, match cut off) |
+| `end_reason` | `state_stopped` (normal: state stopped and a fighter is out of stocks, results screen), `frame_reset` (next match started with no gap, also a match quit from the pause menu), `stopped_long` (state stopped for 5 min with stocks left: paused and walked away, or a timed match), `interrupted` (PC side shut down, match cut off). State also stops while paused; with stocks left the match stays open and continues when it resumes |
 | `complete` | false only for `interrupted` |
 | `winner_port` | 1, 2, or null |
 | `winner_source` | `stocks`, or `dead_status` if stocks tie and one fighter is in DEAD on the last frame (the final stock can drop after the plugin stops sending) |

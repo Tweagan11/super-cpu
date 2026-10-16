@@ -35,9 +35,13 @@ from .wire import (
 )
 
 END_TIMEOUT_S = 1.5
+# State also stops while the game is paused. If nobody is out of stocks when
+# it stops, it's treated as a pause and the match stays open this long.
+PAUSE_TIMEOUT_S = 300.0
 
 # Why a match ended.
-END_STATE_STOPPED = "state_stopped"  # no state for END_TIMEOUT_S (results screen, normal)
+END_STATE_STOPPED = "state_stopped"  # no state for END_TIMEOUT_S and someone is out of stocks (results screen, normal)
+END_STOPPED_LONG = "stopped_long"    # no state for PAUSE_TIMEOUT_S with stocks left (paused and left, timed match, quit)
 END_FRAME_RESET = "frame_reset"      # a new match started with no gap
 END_INTERRUPTED = "interrupted"      # the PC side shut down mid-match
 
@@ -78,11 +82,13 @@ class MatchEnded:
 class MatchBoundary:
     """Turns a stream of frames plus a clock into start and end events."""
 
-    def __init__(self, timeout: float = END_TIMEOUT_S) -> None:
+    def __init__(self, timeout: float = END_TIMEOUT_S, pause_timeout: float | None = None) -> None:
         self.timeout = timeout
+        self.pause_timeout = PAUSE_TIMEOUT_S if pause_timeout is None else pause_timeout
         self.frames = FrameTracker()
         self.final: Frame | None = None  # last frame of the current match, None between matches
         self.last_state_at = 0.0
+        self.paused = False  # state stopped with stocks left; the match is still open
 
     @property
     def in_match(self) -> bool:
@@ -96,12 +102,22 @@ class MatchBoundary:
             events.append(MatchStarted(frame, now))
         self.final = frame
         self.last_state_at = now
+        self.paused = False
         return events
 
     def poll(self, now: float) -> MatchEnded | None:
-        """Call regularly, even when nothing arrives. Ends the match on a timeout."""
-        if self.final is not None and now - self.last_state_at > self.timeout:
-            return self._end(END_STATE_STOPPED, now)
+        """Call regularly, even when nothing arrives. Ends the match when state
+        stops and someone is out of stocks; with stocks left that's a pause
+        (frames carry on from the same counter when it resumes), so wait."""
+        if self.final is None:
+            return None
+        quiet = now - self.last_state_at
+        if quiet > self.timeout:
+            if game_over(self.final):
+                return self._end(END_STATE_STOPPED, now)
+            self.paused = True
+            if quiet > self.pause_timeout:
+                return self._end(END_STOPPED_LONG, now)
         return None
 
     def close(self, now: float) -> MatchEnded | None:
@@ -111,6 +127,7 @@ class MatchBoundary:
     def _end(self, reason: str, now: float) -> MatchEnded:
         ev = MatchEnded(self.final, reason, now)
         self.final = None
+        self.paused = False
         self.frames.last_frame = None
         return ev
 
@@ -118,6 +135,12 @@ class MatchBoundary:
 def fighters(frame: Frame) -> tuple[Fighter, Fighter]:
     """Fighters by port index (0 = port 1), whichever one is the bot."""
     return frame.by_port
+
+
+def game_over(final: Frame) -> bool:
+    """A stock match is over when a fighter is out of stocks. (Early frames of
+    a match read 0 stocks on hardware, but state never stops that early.)"""
+    return any(f.stocks == 0 for f in fighters(final))
 
 
 def winner_port(final: Frame) -> int | None:

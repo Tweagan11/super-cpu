@@ -4,6 +4,7 @@ from bridge.matches import (
     END_FRAME_RESET,
     END_INTERRUPTED,
     END_STATE_STOPPED,
+    END_STOPPED_LONG,
     MatchBoundary,
     MatchEnded,
     MatchStarted,
@@ -21,7 +22,7 @@ class BoundaryTests(unittest.TestCase):
         b = MatchBoundary()
         evs = b.on_frame(frame(0), 10.0)
         self.assertIsInstance(evs[0], MatchStarted)
-        b.on_frame(frame(1), 10.016)
+        b.on_frame(frame(1, opp=fighter(stocks=0)), 10.016)  # opponent out of stocks: game over
         self.assertIsNone(b.poll(11.0))       # 1 s of silence isn't enough
         ev = b.poll(11.6)
         self.assertIsInstance(ev, MatchEnded)
@@ -54,6 +55,46 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(b.close(0.1).reason, END_INTERRUPTED)
 
 
+class PauseTests(unittest.TestCase):
+    """State stops while the game is paused, too. With stocks left that's a
+    pause: the match stays open and carries on when frames resume."""
+
+    def setUp(self):
+        import bridge.matches as m
+
+        self._saved, m.PAUSE_TIMEOUT_S = m.PAUSE_TIMEOUT_S, 300.0
+
+    def tearDown(self):
+        import bridge.matches as m
+
+        m.PAUSE_TIMEOUT_S = self._saved
+
+    def test_pause_keeps_match_open_and_resumes(self):
+        b = MatchBoundary()
+        b.on_frame(frame(0), 0.0)
+        b.on_frame(frame(1), 0.016)
+        self.assertIsNone(b.poll(30.0))      # 30 s paused, stocks left on both
+        self.assertTrue(b.paused and b.in_match)
+        evs = b.on_frame(frame(2), 30.5)     # unpaused: same counter carries on
+        self.assertEqual(evs, [])
+        self.assertFalse(b.paused)
+        b.on_frame(frame(3, opp=fighter(stocks=0)), 31.0)
+        self.assertEqual(b.poll(33.0).reason, END_STATE_STOPPED)
+
+    def test_new_match_after_a_pause_ends_the_old_one(self):
+        b = MatchBoundary()
+        b.on_frame(frame(500), 0.0)
+        b.poll(10.0)                          # quit from the pause menu, say
+        evs = b.on_frame(frame(0), 20.0)
+        self.assertEqual([type(e) for e in evs], [MatchEnded, MatchStarted])
+        self.assertEqual(evs[0].reason, END_FRAME_RESET)
+
+    def test_very_long_stop_with_stocks_left_ends(self):
+        b = MatchBoundary()
+        b.on_frame(frame(0), 0.0)
+        self.assertEqual(b.poll(301.0).reason, END_STOPPED_LONG)
+
+
 class Recorder:
     def __init__(self):
         self.events = []
@@ -78,7 +119,7 @@ class WatcherTests(unittest.TestCase):
         w.packet(pack_heartbeat(0, 1, "13.0.4"), 0.0)
         w.packet(pack_state(1, frame(0)), 0.0)
         w.packet(pack_state(2, frame(1)), 0.02)
-        w.packet(pack_state(3, frame(0)), 0.04)
+        w.packet(pack_state(3, frame(0, opp=fighter(stocks=0))), 0.04)
         w.poll(2.0)
         self.assertEqual(r.events, [
             ("hb", "13.0.4"), ("start", 0), ("frame", 0), ("frame", 1),
