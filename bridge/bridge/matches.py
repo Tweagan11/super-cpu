@@ -20,7 +20,17 @@ from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
 from .protocol import Fighter, Frame
-from .wire import KIND_HEARTBEAT, KIND_STATE, Header, Heartbeat, unpack_header, unpack_heartbeat, unpack_state
+from .wire import (
+    KIND_CONTROL_STATUS,
+    KIND_HEARTBEAT,
+    KIND_STATE,
+    Header,
+    Heartbeat,
+    unpack_control_status,
+    unpack_header,
+    unpack_heartbeat,
+    unpack_state,
+)
 
 END_TIMEOUT_S = 1.5
 
@@ -104,8 +114,8 @@ class MatchBoundary:
 
 
 def fighters(frame: Frame) -> tuple[Fighter, Fighter]:
-    """Fighters by port index (0 = port 1). Until SSB-6, `bot` is port 1."""
-    return frame.bot, frame.opponent
+    """Fighters by port index (0 = port 1), whichever one is the bot."""
+    return frame.by_port
 
 
 def winner_port(final: Frame) -> int | None:
@@ -150,6 +160,7 @@ class MatchSummary:
 
 class MatchObserver(Protocol):
     def on_heartbeat(self, hb: Heartbeat) -> None: ...
+    def on_control_status(self, s) -> None: ...
     def on_match_start(self, ev: MatchStarted) -> None: ...
     def on_frame(self, frame: Frame, seq: int, now: float) -> None: ...
     def on_match_end(self, ev: MatchEnded) -> None: ...
@@ -161,11 +172,17 @@ class MatchWatcher:
     Order per state packet: end of the old match (on a frame reset), start of
     the new one, then the frame itself. Observers can skip methods they don't
     care about by not defining them.
+
+    `bot_port` (1 or 2) is which port is the bot, so `frame.bot` is the bot
+    for every observer. Logs and scores are by port either way (`fighters()`).
     """
 
-    def __init__(self, observers: Sequence[object] = (), timeout: float = END_TIMEOUT_S) -> None:
+    def __init__(self, observers: Sequence[object] = (), timeout: float = END_TIMEOUT_S, bot_port: int = 1) -> None:
+        if bot_port not in (1, 2):
+            raise ValueError("bot port must be 1 or 2")
         self.boundary = MatchBoundary(timeout)
         self.observers = list(observers)
+        self.bot_port = bot_port
 
     def _emit(self, name: str, *args) -> None:
         for obs in self.observers:
@@ -190,7 +207,8 @@ class MatchWatcher:
     def packet(self, buf: bytes, now: float) -> tuple[Header, object]:
         """Decode one raw UDP packet and route it. Raises wire.BadPacket.
 
-        Returns the header and the decoded Heartbeat or Frame (None for other kinds).
+        Returns the header and the decoded Heartbeat, Frame or ControlStatus
+        (None for other kinds).
         """
         header = unpack_header(buf)
         if header.kind == KIND_HEARTBEAT:
@@ -198,9 +216,13 @@ class MatchWatcher:
             self.heartbeat(hb)
             return header, hb
         if header.kind == KIND_STATE:
-            _, frame = unpack_state(buf)
+            _, frame = unpack_state(buf, self.bot_port - 1)
             self.state(header.seq, frame, now)
             return header, frame
+        if header.kind == KIND_CONTROL_STATUS:
+            st = unpack_control_status(buf)
+            self._emit("on_control_status", st)
+            return header, st
         return header, None
 
     def poll(self, now: float) -> MatchEnded | None:

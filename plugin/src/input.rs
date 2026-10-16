@@ -180,6 +180,9 @@ pub const FLAG_HOOK_INSTALLED: u8 = 1;
 pub const FLAG_SESSION_ACTIVE: u8 = 2;
 pub const FLAG_RECEIVING: u8 = 4;
 pub const FLAG_CPU_PROBE: u8 = 8;
+/// `fim_player_idx` is set in config.toml (the port to player_idx mapping
+/// isn't the default one).
+pub const FLAG_FIM_OVERRIDE: u8 = 16;
 
 /// Everything in a control status packet (kind 5, sent with each heartbeat).
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -187,6 +190,8 @@ pub struct Status {
     pub bot_port: u8,
     pub bot_player_idx: i8,
     pub flags: u8,
+    /// player_idx captured as the port that isn't the bot (v3, was reserved)
+    pub other_player_idx: i8,
     pub fim_calls: u32,
     pub idx_seen: u32,
     pub inputs_rx: u32,
@@ -210,7 +215,7 @@ pub fn status_packet(seq: u32, s: &Status) -> [u8; STATUS_LEN] {
     buf[12] = s.bot_port;
     buf[13] = s.bot_player_idx as u8;
     buf[14] = s.flags;
-    // 15 reserved
+    buf[15] = s.other_player_idx as u8;
     let counters = [
         s.fim_calls, s.idx_seen, s.inputs_rx, s.applied, s.late, s.rejected, s.repeats, s.neutral,
         s.cpu_calls, s.cpu_idx_seen,
@@ -229,8 +234,9 @@ pub fn status_packet(seq: u32, s: &Status) -> [u8; STATUS_LEN] {
 // ---------------------------------------------------------------------------
 // Shared state between the network thread and the game thread
 
-/// One pending input. Seqlock: the network thread is the only writer, the
-/// game thread reads and retries a few times if it lands mid-write.
+/// One pending input (or one captured input, see `Capture`). Seqlock: each
+/// slot has exactly one writer thread, readers retry a few times if they
+/// land mid-write and give up rather than wait.
 struct Slot {
     ver: AtomicU32,
     /// apply_at << 32 | for_frame, EMPTY when unused
@@ -251,7 +257,7 @@ impl Slot {
         }
     }
 
-    /// Network thread only.
+    /// One writer thread per slot.
     fn write(&self, key: u64, inputs: u64, ready: u32) {
         let v = self.ver.load(Ordering::Relaxed);
         self.ver.store(v.wrapping_add(1), Ordering::Relaxed);
@@ -378,6 +384,7 @@ impl Shared {
             bot_port,
             bot_player_idx,
             flags,
+            other_player_idx: 0,
             fim_calls: r(&self.fim_calls),
             idx_seen: r(&self.idx_seen),
             inputs_rx: r(&self.inputs_rx),
@@ -395,6 +402,87 @@ impl Shared {
 
 fn bump(a: &AtomicU32) {
     a.fetch_add(1, Ordering::Relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// Input capture (SSB-13): what every port's controller said each frame
+
+/// Frames of captured input kept per port. The state packet for frame N goes
+/// out one frame after N's inputs are mapped, so 2 would do; 4 leaves slack.
+pub const CAPTURE_SLOTS: usize = 4;
+
+/// Per-frame input flags carried in the state packet (v3).
+pub const CAP_P1_VALID: u32 = 1;
+pub const CAP_P2_VALID: u32 = 2;
+/// The PC wrote this port's inputs (the bot, during a session).
+pub const CAP_P1_DRIVEN: u32 = 4;
+pub const CAP_P2_DRIVEN: u32 = 8;
+
+/// The final mapped inputs for ports 1 and 2, keyed by the frame that reads
+/// them. Written by the final input mapping hook (one writer per port), read
+/// by the fighter hook when it publishes a frame. Lock-free both ways.
+pub struct Capture {
+    slots: [[Slot; CAPTURE_SLOTS]; 2],
+}
+
+impl Capture {
+    pub const fn new() -> Capture {
+        const S: Slot = Slot::new();
+        const ROW: [Slot; CAPTURE_SLOTS] = [S; CAPTURE_SLOTS];
+        Capture { slots: [ROW; 2] }
+    }
+
+    /// `port` is 0 for port 1, 1 for port 2. `frame` is the frame these
+    /// inputs take effect on (live_frame + 1). Called again for the same
+    /// frame just overwrites.
+    pub fn put(&self, port: usize, frame: u32, inputs: Inputs, driven: bool) {
+        if port < 2 {
+            self.slots[port][frame as usize % CAPTURE_SLOTS].write(frame as u64, inputs.to_bits(), driven as u32);
+        }
+    }
+
+    /// What `port` had on `frame`, and whether the PC drove it. None if that
+    /// frame was never captured (the slot holds another frame) or the
+    /// writer was mid-write.
+    pub fn get(&self, port: usize, frame: u32) -> Option<(Inputs, bool)> {
+        let (key, inputs, driven) = self.slots.get(port)?[frame as usize % CAPTURE_SLOTS].read()?;
+        (key == frame as u64).then(|| (Inputs::from_bits(inputs), driven != 0))
+    }
+
+    /// Both ports for one frame, in the shape the state packet wants.
+    pub fn frame(&self, frame: u32) -> ([Inputs; 2], u32) {
+        let mut out = [Inputs::NEUTRAL; 2];
+        let mut flags = 0;
+        for port in 0..2 {
+            if let Some((i, driven)) = self.get(port, frame) {
+                out[port] = i;
+                flags |= if port == 0 { CAP_P1_VALID } else { CAP_P2_VALID };
+                if driven {
+                    flags |= if port == 0 { CAP_P1_DRIVEN } else { CAP_P2_DRIVEN };
+                }
+            }
+        }
+        (out, flags)
+    }
+}
+
+/// Which final input mapping player_idx gets captured as port 1 and port 2.
+///
+/// The bot's port uses `bot_player_idx` (config `fim_player_idx`, default
+/// bot_port - 1). The other port uses its own port - 1, unless that's the
+/// index the bot took, in which case the two swap. So the override that
+/// docs/hooks.md suggests for "player_idx is the controller slot" flips both
+/// ports, not just the bot's. Still unverified on hardware.
+pub fn capture_map(bot_port: u8, bot_player_idx: i32) -> [i32; 2] {
+    let mut m = [0, 1];
+    for (p, idx) in m.iter_mut().enumerate() {
+        if p + 1 == bot_port as usize {
+            *idx = bot_player_idx;
+        } else if p as i32 == bot_player_idx {
+            *idx = bot_port as i32 - 1;
+        }
+    }
+    m
 }
 
 // ---------------------------------------------------------------------------
@@ -560,6 +648,11 @@ static CLOCK: OnceLock<Instant> = OnceLock::new();
 
 static BOT_PORT: AtomicU8 = AtomicU8::new(2);
 static BOT_PLAYER_IDX: AtomicI32 = AtomicI32::new(1);
+static FIM_OVERRIDE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// player_idx captured as port 1 and port 2 (`capture_map`).
+static CAPTURE_IDX: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(1)];
+/// Every port's final mapped inputs, read by state.rs when it publishes a frame.
+pub static CAPTURE: Capture = Capture::new();
 /// Set by control.rs once the final input mapping hook is in.
 pub static HOOK_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Set by net.rs when the socket can receive (read timeout accepted).
@@ -574,10 +667,15 @@ pub fn now_ms() -> u64 {
 
 /// `bot_port` is 1-based. `bot_player_idx` is the final input mapping's
 /// player_idx to drive (normally bot_port - 1, see docs/hooks.md).
-pub fn init(bot_port: u8, bot_player_idx: i32, acks: SyncSender<Ack>) {
+/// `fim_override` is true when config.toml set `fim_player_idx`.
+pub fn init(bot_port: u8, bot_player_idx: i32, fim_override: bool, acks: SyncSender<Ack>) {
     let _ = CLOCK.get_or_init(Instant::now);
     BOT_PORT.store(bot_port, Ordering::Relaxed);
     BOT_PLAYER_IDX.store(bot_player_idx, Ordering::Relaxed);
+    FIM_OVERRIDE.store(fim_override, Ordering::Relaxed);
+    for (a, idx) in CAPTURE_IDX.iter().zip(capture_map(bot_port, bot_player_idx)) {
+        a.store(idx, Ordering::Relaxed);
+    }
     let _ = ACK_TX.set(acks);
 }
 
@@ -599,7 +697,15 @@ pub fn status() -> Status {
     if CPU_PROBE_INSTALLED.load(Ordering::Relaxed) {
         flags |= FLAG_CPU_PROBE;
     }
-    SHARED.status(bot_port(), BOT_PLAYER_IDX.load(Ordering::Relaxed) as i8, flags)
+    if FIM_OVERRIDE.load(Ordering::Relaxed) {
+        flags |= FLAG_FIM_OVERRIDE;
+    }
+    let mut s = SHARED.status(bot_port(), BOT_PLAYER_IDX.load(Ordering::Relaxed) as i8, flags);
+    // the port that isn't the bot (bot_port is 1 or 2 in practice; 3+ means
+    // neither captured port is the bot and port 2 is reported)
+    let other = if bot_port() == 2 { 0 } else { 1 };
+    s.other_player_idx = CAPTURE_IDX[other].load(Ordering::Relaxed) as i8;
+    s
 }
 
 /// set_cpu_controls probe, game thread. Read only: records which
@@ -631,21 +737,31 @@ pub fn seen_bit(v: i32) -> u32 {
 pub fn on_final_input_mapping(player_idx: i32, orig: Inputs, live_frame: Option<u32>) -> Option<Inputs> {
     bump(&SHARED.fim_calls);
     SHARED.idx_seen.fetch_or(seen_bit(player_idx), Ordering::Relaxed);
-    if player_idx != BOT_PLAYER_IDX.load(Ordering::Relaxed) {
-        return None;
-    }
-    SHARED.orig.store(orig.to_bits(), Ordering::Relaxed);
     let target = live_frame?.wrapping_add(1);
-    let mut applier = match APPLIER.lock() {
-        Ok(a) => a,
-        Err(poisoned) => poisoned.into_inner(),
+    let out = if player_idx == BOT_PLAYER_IDX.load(Ordering::Relaxed) {
+        SHARED.orig.store(orig.to_bits(), Ordering::Relaxed);
+        let mut applier = match APPLIER.lock() {
+            Ok(a) => a,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        applier.step(&SHARED, target, now_ms(), &mut |a| {
+            if let Some(tx) = ACK_TX.get() {
+                // never block the game; a full queue just loses the ack
+                let _ = tx.try_send(a);
+            }
+        })
+    } else {
+        None
     };
-    applier.step(&SHARED, target, now_ms(), &mut |a| {
-        if let Some(tx) = ACK_TX.get() {
-            // never block the game; a full queue just loses the ack
-            let _ = tx.try_send(a);
+    // SSB-13: record what this port's fighter will actually read on
+    // `target`, for the state packet. Two atomic compares and one seqlock
+    // write, no locks.
+    for (port, idx) in CAPTURE_IDX.iter().enumerate() {
+        if idx.load(Ordering::Relaxed) == player_idx {
+            CAPTURE.put(port, target, out.unwrap_or(orig), out.is_some());
         }
-    })
+    }
+    out
 }
 
 #[cfg(test)]
@@ -667,10 +783,10 @@ mod tests {
 
     // The same hex strings are checked in bridge/tests/test_inputs.py, so a
     // layout change on either side breaks a test.
-    const GOLDEN_INPUT: &str = "534350550200020007000000e8030000ea0300007f81050a05000000";
-    const GOLDEN_ACK: &str = "534350550200040009000000e8030000ea030000e9030000";
+    const GOLDEN_INPUT: &str = "534350550300020007000000e8030000ea0300007f81050a05000000";
+    const GOLDEN_ACK: &str = "534350550300040009000000e8030000ea030000e9030000";
     const GOLDEN_STATUS: &str = concat!(
-        "53435055020005000b000000", "02010700",
+        "53435055030005000b000000", "02010700",
         "e8030000", "03000000", "e2030000", "de030000",
         "01000000", "02000000", "03000000", "04000000",
         "40060000", "06000000",
@@ -702,6 +818,7 @@ mod tests {
             bot_port: 2,
             bot_player_idx: 1,
             flags: 7,
+            other_player_idx: 0,
             fim_calls: 1000,
             idx_seen: 3,
             inputs_rx: 994,
@@ -919,6 +1036,35 @@ mod tests {
     fn falls_back_to_state_frame_if_hook_quiet() {
         let s = Shared::new();
         assert_eq!(s.next_target(1000, 41), 42);
+    }
+
+    #[test]
+    fn capture_keyed_by_frame() {
+        let c = Capture::new();
+        let a = Inputs { stick_x: 10, buttons: 1, ..Inputs::NEUTRAL };
+        let b = Inputs { cstick_y: -5, buttons: 4, ..Inputs::NEUTRAL };
+        assert_eq!(c.frame(7), ([Inputs::NEUTRAL; 2], 0), "nothing captured yet");
+        c.put(0, 7, a, false);
+        c.put(1, 7, b, true);
+        assert_eq!(c.frame(7), ([a, b], CAP_P1_VALID | CAP_P2_VALID | CAP_P2_DRIVEN));
+        // frame 7 + CAPTURE_SLOTS lands in the same slot and replaces it
+        c.put(0, 7 + CAPTURE_SLOTS as u32, b, false);
+        assert_eq!(c.get(0, 7), None);
+        assert_eq!(c.get(0, 7 + CAPTURE_SLOTS as u32), Some((b, false)));
+        assert_eq!(c.frame(7).1, CAP_P2_VALID | CAP_P2_DRIVEN);
+        // same frame again (pause) just overwrites
+        c.put(1, 7, a, false);
+        assert_eq!(c.get(1, 7), Some((a, false)));
+        c.put(5, 7, a, false); // out of range port is ignored
+    }
+
+    #[test]
+    fn capture_mapping() {
+        assert_eq!(capture_map(2, 1), [0, 1], "default, bot on port 2");
+        assert_eq!(capture_map(1, 0), [0, 1], "default, bot on port 1");
+        assert_eq!(capture_map(2, 0), [1, 0], "override swaps the other port too");
+        assert_eq!(capture_map(1, 1), [1, 0]);
+        assert_eq!(capture_map(2, 4), [0, 4], "override to a slot outside 0..1 leaves port 1 alone");
     }
 
     #[test]

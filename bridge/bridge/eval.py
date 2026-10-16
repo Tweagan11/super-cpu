@@ -11,9 +11,9 @@ nothing. The results.csv row is only written once all N games are in.
 
 This only watches. It doesn't send inputs or touch menus, so someone has to
 press rematch between games. See eval/README.md for what fully unattended
-needs. To run it in the same process as the bot (one UDP socket), build the
-observers with `EvalSession(...).observers()` and hand them to the bot loop's
-MatchWatcher.
+needs. To score the bot while it plays, use `bridge.run --eval N`, which runs
+an EvalSession on bridge.run's own MatchWatcher (one UDP socket). This
+standalone version is for scoring human or CPU sets.
 """
 from __future__ import annotations
 
@@ -221,7 +221,7 @@ def watch(session: EvalSession, port: int, idle_timeout: float | None = None) ->
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("0.0.0.0", port))
     sock.settimeout(0.2)
-    watcher = MatchWatcher(session.observers())
+    watcher = MatchWatcher(session.observers(), bot_port=session.bot_port)
     session.echo(f"[eval] {session.run_id}: waiting for {session.games} games on UDP :{port}, "
                  f"bot on P{session.bot_port}, stage {session.stage}")
     last_packet = time.monotonic()

@@ -5,6 +5,7 @@
     python -m bridge.fake_switch --drop 0.02     # throw away 2% of packets it sends
     python -m bridge.fake_switch --latency-ms 20 # inputs take 20 ms to "arrive"
     python -m bridge.fake_switch --matches 3     # 3 short matches with stock losses, a winner, and gaps
+                                                 # (takes inputs and acks too, so bridge.run --eval works)
 
 Sends the same packets as plugin/src/net.rs: a heartbeat plus a control
 status every 500 ms and, during the fake match, one state packet per frame
@@ -20,6 +21,12 @@ Timing matches the real plugin: the input for frame N is picked at the start
 of frame N, and state for frame N goes out at the start of frame N + 1, so
 the fastest possible round trip is 2 frames.
 
+Like plugin v3, every state packet carries both ports' captured inputs
+(SSB-13): the bot's port gets what was actually applied (marked as driven by
+the PC) while a session is on, and the other port gets plausible "human"
+inputs from `human_inputs()`. With no session the bot's port gets the same
+kind of synthesized controller input, not driven.
+
 `--version 13.0.3` pretends the Switch runs the wrong game build: like the
 real plugin, it then sends heartbeats only.
 """
@@ -33,6 +40,7 @@ import socket
 import time
 from dataclasses import dataclass, replace
 
+from . import buttons as B
 from .protocol import Fighter, Frame, Inputs
 from .stages import STAGE_ID_BATTLEFIELD, STAGE_ID_UNKNOWN
 from .statuses import STATUS_NAMES
@@ -108,6 +116,25 @@ def fake_fighter(t: float, side: int) -> Fighter:
         facing=-side,
         jumps_left=jumps_left,
         flags=flags,
+    )
+
+
+def human_inputs(i: int, side: int) -> Inputs:
+    """Plausible controller input for frame i: the stick sweeps back and
+    forth, a jab every 40 frames (held 3), a jump every 90, shield now and
+    then, and a c-stick flick every 120. Deterministic, so tests can check it."""
+    phase = i + (0 if side < 0 else 17)
+    buttons = 0
+    if phase % 40 < 3:
+        buttons |= B.ATTACK
+    if phase % 90 < 2:
+        buttons |= B.JUMP
+    if phase % 150 >= 140:
+        buttons |= B.GUARD | B.GUARD_HOLD
+    cx = 127 if phase % 120 < 4 else 0
+    return Inputs(
+        stick_x=round(100 * math.sin(phase / 25)), stick_y=-60 if phase % 200 < 10 else 0,
+        cstick_x=cx, cstick_y=0, buttons=buttons | (B.CSTICK_ON if cx else 0),
     )
 
 
@@ -211,7 +238,12 @@ class FakeInputSide:
 
 
 def run(host: str, port: int, drop: float, version: str, match: bool, seconds: float | None,
-        bot_port: int = 2, latency_ms: float = 0.0, input_drop: float = 0.0, quiet: bool = False) -> FakeInputSide:
+        bot_port: int = 2, latency_ms: float = 0.0, input_drop: float = 0.0, quiet: bool = False,
+        matches: int | None = None, match_seconds: float = 6.0, gap: float = 2.5,
+        winners: tuple[int, ...] = (2, 2, 1)) -> FakeInputSide:
+    """`matches=N` plays N scripted matches (stock losses, a winner, gaps for
+    the results screen) back to back, then stops; otherwise one endless
+    drifting match. Inputs and acks work the same either way."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("0.0.0.0", 0))
     sock.setblocking(False)
@@ -229,7 +261,20 @@ def run(host: str, port: int, drop: float, version: str, match: bool, seconds: f
         log(f"[fake] version {version} != {EXPECTED_GAME_VERSION}, heartbeats only")
         match = False
     log(f"[fake] sending to {host}:{port}, {'with' if match else 'without'} a match, dropping {drop:.0%}, "
-        f"bot on port {bot_port}, input latency {latency_ms:.0f} ms")
+        f"bot on port {bot_port}, input latency {latency_ms:.0f} ms"
+        + (f", {matches} matches of {match_seconds}s with {gap}s gaps" if matches else ""))
+    script: list[Frame] | None = None  # current scripted match, None = endless drift
+    match_no = 0
+    gap_until: float | None = None
+
+    def next_script() -> list[Frame] | None:
+        winner = winners[match_no % len(winners)]
+        log(f"[fake] match {match_no + 1}/{matches}: P{winner} wins")
+        return scripted_match(int(match_seconds * 60), winner, winner_losses=match_no % 3,
+                              stage_id=STAGE_ID_BATTLEFIELD)
+
+    if matches:
+        script = next_script()
 
     def send(packet: bytes) -> None:
         nonlocal sent, dropped, seq
@@ -272,7 +317,7 @@ def run(host: str, port: int, drop: float, version: str, match: bool, seconds: f
             flags |= FLAG_SESSION_ACTIVE
         c = side.c
         return ControlStatus(
-            Header(2, 5, 0), bot_port, bot_port - 1, flags,
+            Header(3, 5, 0), bot_port, bot_port - 1, flags, other_player_idx=2 - bot_port,
             fim_calls=2 * frame, idx_seen=0b11, inputs_rx=c.inputs_rx, applied=c.applied, late=c.late,
             rejected=c.rejected, repeats=c.repeats, neutral=c.neutral,
         )
@@ -282,17 +327,29 @@ def run(host: str, port: int, drop: float, version: str, match: bool, seconds: f
         while seconds is None or time.monotonic() - start < seconds:
             now = time.monotonic()
             pump(now)
-            if match and now >= next_tick:
+            if gap_until is not None and now >= gap_until:
+                gap_until = None
+                match_no += 1
+                if match_no >= (matches or 0):
+                    break
+                script = next_script()
+                frame = 0
+                next_tick = now
+            if match and gap_until is None and now >= next_tick:
                 next_tick += FRAME_TIME
                 if next_tick < now - 0.1:
                     next_tick = now  # fell way behind (debugger, sleep); don't burst
                 t = now - start
-                # 1. the game maps the bot's controller for this frame
+                # 1. the game maps every controller for this frame
                 inputs, ack = side.step(frame, now)
                 # 2. the fighters update; the first one flushes last frame's state
                 if pending_state is not None:
                     send(pack_state(seq, pending_state))
-                p1, p2 = fake_fighter(t, -1), fake_fighter(t, 1)
+                    pending_state = None
+                if script is not None:
+                    p1, p2 = script[frame].bot, script[frame].opponent
+                else:
+                    p1, p2 = fake_fighter(t, -1), fake_fighter(t, 1)
                 bot = p2 if bot_port == 2 else p1
                 if inputs is None:
                     bot_x = None  # back to the "AI"
@@ -306,10 +363,22 @@ def run(host: str, port: int, drop: float, version: str, match: bool, seconds: f
                     p2 = bot
                 else:
                     p1 = bot
-                pending_state = Frame(frame, STAGE_ID_BATTLEFIELD, p1, p2)
+                # 3. what each port's fighter read this frame (SSB-13 capture)
+                human = [human_inputs(frame, -1), human_inputs(frame, 1)]
+                driven = [False, False]
+                if inputs is not None:
+                    human[bot_port - 1] = inputs
+                    driven[bot_port - 1] = True
+                pending_state = Frame(frame, STAGE_ID_BATTLEFIELD, p1, p2,
+                                      inputs=(human[0], human[1]), driven=(driven[0], driven[1]))
                 if ack is not None:
                     send(pack_ack(seq, *ack))
                 frame += 1
+                if script is not None and frame >= len(script):
+                    # results screen: last state goes out, then heartbeats only
+                    send(pack_state(seq, pending_state))
+                    pending_state = None
+                    gap_until = now + gap
             if now >= next_hb:
                 next_hb = now + 0.5
                 send(pack_heartbeat(seq, int((now - start) * 1000), version, True, 2 * frame, frame))
@@ -363,60 +432,6 @@ def scripted_match(
     return frames
 
 
-def run_matches(
-    host: str, port: int, drop: float, version: str, n_matches: int,
-    match_seconds: float, gap: float, winners: list[int], realtime: bool = True,
-) -> None:
-    """Play `n_matches` fake matches back to back with `gap` seconds of
-    heartbeats-only between them, like the results screen and rematch."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    start = time.monotonic()
-    seq = sent = dropped = 0
-    next_hb = start
-    rng = random.Random(1234)
-    print(f"[fake] sending {n_matches} matches to {host}:{port}, {match_seconds}s each, {gap}s gaps")
-
-    def send(packet: bytes) -> None:
-        nonlocal sent, dropped, seq
-        if rng.random() >= drop:
-            sock.sendto(packet, (host, port))
-            sent += 1
-        else:
-            dropped += 1
-        seq += 1
-
-    def heartbeat_if_due(frames_done: int) -> None:
-        nonlocal next_hb
-        now = time.monotonic()
-        if now >= next_hb:
-            next_hb = now + 0.5
-            send(pack_heartbeat(seq, int((now - start) * 1000), version, True, 2 * frames_done, frames_done))
-
-    def idle(seconds: float, frames_done: int) -> None:
-        end = time.monotonic() + seconds
-        while time.monotonic() < end:
-            heartbeat_if_due(frames_done)
-            time.sleep(0.05)
-
-    total = 0
-    idle(0.6, 0)  # make sure a heartbeat lands before the first match
-    for m in range(n_matches):
-        winner = winners[m % len(winners)]
-        match = scripted_match(int(match_seconds * 60), winner, winner_losses=m % 3)
-        print(f"[fake] match {m + 1}/{n_matches}: P{winner} wins")
-        t0 = time.monotonic()
-        for i, f in enumerate(match):
-            send(pack_state(seq, f))
-            total += 1
-            heartbeat_if_due(total)
-            if realtime:
-                delay = t0 + (i + 1) * FRAME_TIME - time.monotonic()
-                if delay > 0:
-                    time.sleep(delay)
-        idle(gap, total)
-    print(f"[fake] done: sent {sent}, dropped {dropped}")
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
@@ -428,18 +443,15 @@ def main() -> None:
     ap.add_argument("--bot-port", type=int, default=2, choices=(1, 2))
     ap.add_argument("--latency-ms", type=float, default=0.0, help="hold incoming inputs this long before using them")
     ap.add_argument("--input-drop", type=float, default=0.0, help="fraction of incoming inputs to throw away")
-    ap.add_argument("--matches", type=int, default=None, help="play N short scripted matches, then stop (no inputs)")
+    ap.add_argument("--matches", type=int, default=None, help="play N short scripted matches, then stop")
     ap.add_argument("--match-seconds", type=float, default=6.0)
     ap.add_argument("--gap", type=float, default=2.5, help="seconds between matches (must beat the 1.5 s end timeout)")
     ap.add_argument("--winners", default="2,2,1", help="winning port per match, cycled, e.g. 2,2,1")
     args = ap.parse_args()
-    if args.matches:
-        winners = [int(w) for w in args.winners.split(",")]
-        run_matches(args.host, args.port, args.drop, args.version, args.matches,
-                    args.match_seconds, args.gap, winners)
-        return
+    winners = tuple(int(w) for w in args.winners.split(","))
     run(args.host, args.port, args.drop, args.version, not args.no_match, args.seconds,
-        args.bot_port, args.latency_ms, args.input_drop)
+        args.bot_port, args.latency_ms, args.input_drop, matches=args.matches,
+        match_seconds=args.match_seconds, gap=args.gap, winners=winners)
 
 
 if __name__ == "__main__":

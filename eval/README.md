@@ -45,17 +45,23 @@ The `stage` column was added to `results.csv` for SSB-8. The harness upgrades an
 
 ## Running it alongside the bot
 
-`python -m bridge.eval` only watches the state stream. It doesn't send inputs. The bot itself runs through `bridge.run --policy NAME` (being built on another branch). Both bind UDP 4243, so they can't both run as separate processes on the same port. Two ways to deal with that:
+`bridge.run` plays, logs and scores in one process (they'd all want UDP 4243 otherwise):
 
-1. Have `bridge.run` pass `EvalSession(...).observers()` to its `MatchWatcher`, so one process plays and scores. This is the intended setup once `bridge.run` lands, and it's a few lines.
-2. Until then, `python -m bridge.eval` on its own is good for scoring a human or a CPU-vs-CPU set, and for testing the harness against `python -m bridge.fake_switch --matches N`.
+```
+cd bridge
+python -m bridge.run --policy scripted --bot-port 2 --log --eval 50 --model scripted --opponent cpu9 --stage fd
+```
+
+`--eval N` runs an `EvalSession` on bridge.run's own `MatchWatcher`, stops once N games count, and writes the results.csv row. It takes the same `--model` (default: the policy name), `--opponent`, `--stage`, `--platform`, `--mod-hash`, `--expect-version`, `--min-seconds`, `--results` and `--data-dir` as `bridge.eval`. `--log [DIR]` also writes the per-frame match logs (with the bot's inputs and, on a v3 plugin, both ports' captured inputs); without it the eval still scores but writes no `.npz` files.
+
+`python -m bridge.eval` on its own still works for scoring a human or a CPU-vs-CPU set (it only listens), and both can be tried against `python -m bridge.fake_switch --matches N`, which now takes inputs too.
 
 ## What "unattended" still needs
 
 Phase 1's gate is a 50-game eval that runs unattended. Today it runs with **a human pressing rematch** between games: the harness prints "press rematch for the next game" and picks up the next match on its own. Everything after the first frame is automatic. What's missing for a truly hands-off run:
 
-1. **Input path (another branch).** The bot has to actually be playing: `bridge.run --policy scripted` sending input packets, and the plugin applying them to the bot's port.
-2. **One process for play and eval.** Wire `EvalSession.observers()` into `bridge.run`'s watcher (see above), or add a state fan-out so both can listen.
+1. ~~Input path.~~ Done, tested against the fake Switch; first hardware run pending (docs/testing-phase0.md step 9).
+2. ~~One process for play and eval.~~ Done: `bridge.run --eval N` (above).
 3. **Results screen to next match.** Needs menu automation, which doesn't exist. The plugin stops sending state on the results screen, so the PC can't see where it is. Options: (a) plugin-side, press A on the results screen and pick "rematch"/ready on character select through the same input-injection hook, ideally driven by a new "menu" packet from the PC; (b) use a ruleset/mode that loops by itself (for example a Training Modpack style auto-restart, or a custom mode that resets stocks instead of ending the match). Either way the plugin has to report the scene (results / CSS / stage select / in match) so the PC knows what to press.
 4. **Character select state.** On rematch the CPU level, costume, and port assignment have to stay the same. The plugin should send both fighter kinds and CPU level in a handshake so the harness can refuse a wrong setup instead of logging it.
 5. **Stage selection.** Same problem for alternating Battlefield and FD. Stage id is streamed now, so mixed-stage runs score correctly; picking the stage still needs menu automation.

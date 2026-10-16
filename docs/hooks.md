@@ -23,7 +23,7 @@ Rule: no raw addresses. A hook is either by symbol (skyline-smash binding) or by
 | How | byte-pattern search with `NEEDLE_FIM`, copied from `src/common/offsets.rs` (the modpack notes it was at text+0x1750dd0 when they wrote it). Hook signature copied from `handle_final_input_mapping` in `src/training/mod.rs` |
 | Signature | `(mappings: *mut ControllerMapping, player_idx: i32, out: *mut MappedInputs, controller_struct: &mut SomeControllerStruct, arg: bool)`. We pass the two struct pointers through untouched, so they're `*mut u8` on our side (same ABI) |
 | Runs | once per player per frame, turns that player's controller state plus their button config into `MappedInputs` |
-| What we do | call the original, then if `player_idx` is the bot's and a PC session is live and a match is running, overwrite `*out` |
+| What we do | call the original, then if `player_idx` is the bot's and a PC session is live and a match is running, overwrite `*out`. For the two captured ports, also copy the final `*out` into the capture ring (SSB-13, docs/protocol.md "Captured inputs"), keyed by the frame it takes effect on |
 | `MappedInputs` | `src/common/input.rs`: `buttons: u32` (the `Buttons` bitflags, same as `bridge/bridge/buttons.py`), then `lstick_x, lstick_y, rstick_x, rstick_y: i8`. 8 bytes, checked with a compile-time size assert |
 | Modpack precedent | input delay (`src/training/input_delay.rs`) and input recording (`src/training/input_record.rs`, `handle_final_input_mapping`) both edit `*out` exactly like this, for player 0 |
 

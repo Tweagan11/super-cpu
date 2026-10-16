@@ -16,15 +16,18 @@ from bridge.stages import (
 from bridge.udp_listen import describe, stage_line
 from bridge.wire import pack_heartbeat, pack_state, unpack_heartbeat, unpack_state
 
-# Bytes from plugin/src/net.rs::state_packet, built on host stable Rust with
+# Bytes from plugin/src/net.rs::state_packet (v3: plus a zero capture tail; the
+# full v3 golden with inputs is in test_capture.py), built on host stable Rust with
 # stub smash/skyline types (scratch crate, see the SSB-3 commit message). Same
 # values as rust_frame() below. If the Rust layout changes, regenerate this.
 RUST_STATE_HEX = (
-    "534350550200010009000000d2040000010000002d00000000004841000050400000c0bf"
+    "534350550300010009000000d2040000010000002d00000000004841000050400000c0bf"
     "0000304000002a42000016420300000047000000000000002301efcdab00000000008040"
     "ffffffff01000000030000002d000000000048c1000050400000c03f0000304000002041"
     "000016420300000047000000000000002301efcdab00000000008040ffffffff01000000"
     "03000000"
+    # v3 tail: input_flags 0, both ports uncaptured (zeros)
+    "0000000000000000000000000000000000000000"
 )
 
 
