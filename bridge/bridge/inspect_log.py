@@ -20,6 +20,20 @@ def top_statuses(col: np.ndarray, top: int = 5) -> str:
     return ", ".join(f"{status_name(int(kinds[i]))} {int(counts[i])}" for i in order)
 
 
+def input_line(h: dict, slot: int) -> str:
+    cap = h.get("input_capture", {})
+    i = slot - 1
+    src = cap.get("port_sources", ["?", "?"])[i] if "port_sources" in cap else "?"
+    out = f"     input sources: {src}"
+    if "rows_control_module" in cap:
+        out += (f", control module rows {cap['rows_control_module'][i]} "
+                f"(filled {cap['rows_from_control_module'][i]})")
+    ag = cap.get("control_module_agreement", [{}, {}])[i] if "control_module_agreement" in cap else {}
+    if ag.get("rows_compared"):
+        out += f", fim agreement {ag['all_pct']}% of {ag['rows_compared']} rows"
+    return out
+
+
 def summarize(m: LoadedMatch) -> str:
     h = m.header
     n = len(m.frames)
@@ -44,6 +58,7 @@ def summarize(m: LoadedMatch) -> str:
         )
         if n:
             lines.append(f"     top statuses: {top_statuses(col)}")
+            lines.append(input_line(h, p["slot"]))
     return "\n".join(lines)
 
 

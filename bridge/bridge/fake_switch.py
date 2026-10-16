@@ -27,6 +27,11 @@ the PC) while a session is on, and the other port gets plausible "human"
 inputs from `human_inputs()`. With no session the bot's port gets the same
 kind of synthesized controller input, not driven.
 
+Like plugin v4, it also sends each port's ControlModule inputs. They equal the
+captured ones, except for `--cpu-ports 1,2` (comma list of ports): those ports
+are "CPUs", which the real final input mapping never sees, so they get no
+captured inputs and only the ControlModule block, like a CPU vs CPU match.
+
 `--version 13.0.3` pretends the Switch runs the wrong game build: like the
 real plugin, it then sends heartbeats only.
 """
@@ -241,7 +246,7 @@ class FakeInputSide:
 def run(host: str, port: int, drop: float, version: str, match: bool, seconds: float | None,
         bot_port: int = 2, latency_ms: float = 0.0, input_drop: float = 0.0, quiet: bool = False,
         matches: int | None = None, match_seconds: float = 6.0, gap: float = 2.5,
-        winners: tuple[int, ...] = (2, 2, 1)) -> FakeInputSide:
+        winners: tuple[int, ...] = (2, 2, 1), cpu_ports: tuple[int, ...] = ()) -> FakeInputSide:
     """`matches=N` plays N scripted matches (stock losses, a winner, gaps for
     the results screen) back to back, then stops; otherwise one endless
     drifting match. Inputs and acks work the same either way."""
@@ -370,8 +375,11 @@ def run(host: str, port: int, drop: float, version: str, match: bool, seconds: f
                 if inputs is not None:
                     human[bot_port - 1] = inputs
                     driven[bot_port - 1] = True
+                # v4: every fighter's ControlModule read; a CPU port has no capture
+                cm = (human[0], human[1])
+                fim = tuple(None if (i + 1) in cpu_ports and not driven[i] else human[i] for i in range(2))
                 pending_state = Frame(frame, STAGE_ID_BATTLEFIELD, p1, p2,
-                                      inputs=(human[0], human[1]), driven=(driven[0], driven[1]))
+                                      inputs=fim, driven=(driven[0], driven[1]), cm_inputs=cm)
                 if ack is not None:
                     send(pack_ack(seq, *ack))
                 frame += 1
@@ -451,11 +459,13 @@ def main() -> None:
     ap.add_argument("--match-seconds", type=float, default=6.0)
     ap.add_argument("--gap", type=float, default=2.5, help="seconds between matches (must beat the 1.5 s end timeout)")
     ap.add_argument("--winners", default="2,2,1", help="winning port per match, cycled, e.g. 2,2,1")
+    ap.add_argument("--cpu-ports", default="", help="ports played by CPUs, e.g. 1,2: control module inputs only")
     args = ap.parse_args()
     winners = tuple(int(w) for w in args.winners.split(","))
+    cpu_ports = tuple(int(w) for w in args.cpu_ports.split(",") if w)
     run(args.host, args.port, args.drop, args.version, not args.no_match, args.seconds,
         args.bot_port, args.latency_ms, args.input_drop, matches=args.matches,
-        match_seconds=args.match_seconds, gap=args.gap, winners=winners)
+        match_seconds=args.match_seconds, gap=args.gap, winners=winners, cpu_ports=cpu_ports)
 
 
 if __name__ == "__main__":

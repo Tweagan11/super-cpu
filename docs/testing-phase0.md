@@ -203,7 +203,7 @@ The p99 round trip is the training delay (training/README.md: "train with input 
 
 ## 10. Input capture: human inputs in the stream (SSB-13)
 
-Plugin and bridge are now protocol v3, so rebuild and recopy the `.nro` first (an old plugin shows up as "protocol v2, expected v3").
+Plugin and bridge are now protocol v4, so rebuild and recopy the `.nro` first (an old plugin shows up as "protocol v3, expected v4").
 
 ### 10a. PC side first
 
@@ -238,6 +238,22 @@ Versus match, you on port 1, a second controller on port 2, **no bridge running*
 **Port or controller slot, again.** Swap which controller picks which port at character select (like 9c). If P1's line still follows the controller on port 1, `player_idx` is the port. If the lines follow the controllers instead, it's the slot: tell me, set `fim_player_idx` (that swaps both captured ports), and note that logs made before have the input columns swapped (their header's `input_capture.mapping` says which mapping they used).
 
 Then with the bridge driving P2 (`python -m bridge.run --policy walk --log`): finish a match and run `inspect_log` on it. Both ports should be `inputs_present`, and the `.json` header's `input_capture.ack_capture_mismatches` should be 0. Nonzero means the captured frame and the applied frame disagree: send me the header.
+
+### 10e. Control module inputs: CPU vs CPU (v4)
+
+This is what lets level 9 R.O.B. vs R.O.B. matches log inputs with nobody holding a controller.
+
+PC side first: `python -m bridge.udp_listen` and `python -m bridge.fake_switch --cpu-ports 1,2` to see packets arrive, and `test_capture.py` for the logger side.
+
+On the Switch:
+
+1. Start the game with the new `.nro`. In the plugin log (`udp_listen` shows it, or the Skyline log) look for `control module: pad button table matches the game constants`. Any `pad button X is ...` line means the button translation is off: send it to me before trusting anything else.
+2. Versus match, both ports set to CPU level 9, R.O.B. vs R.O.B., no bridge needed (`python -m bridge.run --policy walk --log` with no session is fine too, or just `udp_listen` + the logger of your choice). Let one stock go by, then finish the match.
+3. `python -m bridge.inspect_log data/matches/<newest>.npz`. Expect `inputs: present`, and under each port `input sources: control_module` with `rows_from_control_module` roughly the frame count. Look at the `.json`: `input_capture.port_sources` is `["control_module", "control_module"]` and `rows_control_module` close to `frame_count` on both ports.
+4. Sanity check the data: P1's `stick_x` column should not be all zeros, `buttons` should show `ATTACK`/`SPECIAL`/`JUMP` bits at times (R.O.B. CPUs use all three), and `input_valid` is 1 on both ports.
+5. Human agreement (validates the translation): one match with you on port 1, human controller, any opponent. Press every button a few times, move the stick through its range, flick the c-stick, shield, grab. Finish it and look at `input_capture.control_module_agreement[0]`: expect `rows_compared` close to `frame_count` and `all_pct` above 95. If lower, `buttons` below `rows_compared` means the button table or timing is off (try the shield and grab presses first), `main` or `cstick` means the stick scaling or axes. Send me the header.
+
+Known quirks to expect, not bugs: frame 0 of a match; a few rows in hitlag where the CPU holds its last input; `GUARD_HOLD`/`*_RAW` bits may differ between sources and are ignored by the agreement check.
 
 ## If nothing shows up
 

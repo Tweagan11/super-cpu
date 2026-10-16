@@ -33,10 +33,10 @@ from bridge.wire import (
 
 # Same strings as GOLDEN_* in plugin/src/input.rs. If one side changes a
 # layout, both test suites have to change.
-GOLDEN_INPUT = "534350550300020007000000e8030000ea0300007f81050a05000000"
-GOLDEN_ACK = "534350550300040009000000e8030000ea030000e9030000"
+GOLDEN_INPUT = "534350550400020007000000e8030000ea0300007f81050a05000000"
+GOLDEN_ACK = "534350550400040009000000e8030000ea030000e9030000"
 GOLDEN_STATUS = (
-    "53435055030005000b000000" "02010700"
+    "53435055040005000b000000" "02010700"
     "e8030000" "03000000" "e2030000" "de030000"
     "01000000" "02000000" "03000000" "04000000"
     "40060000" "06000000"
@@ -72,7 +72,7 @@ class LayoutTests(unittest.TestCase):
 
     def test_status_matches_rust(self):
         s = ControlStatus(
-            Header(3, 5, 11), 2, 1, 7, fim_calls=1000, idx_seen=3, inputs_rx=994, applied=990,
+            Header(4, 5, 11), 2, 1, 7, fim_calls=1000, idx_seen=3, inputs_rx=994, applied=990,
             late=1, rejected=2, repeats=3, neutral=4, cpu_calls=1600, cpu_idx_seen=6,
             orig=Inputs(120, -120, 0, 0, 4),
         )

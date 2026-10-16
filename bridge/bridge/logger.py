@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -77,6 +78,44 @@ STATE_FIELDS = [
 
 DEFAULT_RULESET = {"stocks": 3, "items": False, "time_limit_min": None}
 DEAD_STATUS = 181  # FIGHTER_STATUS_KIND_DEAD
+
+
+def _action_encoder() -> Callable | None:
+    """`training.actions.encode_arrays`, used to compare two input sources in
+    action-class space. The bridge tests run from `bridge/`, where `training`
+    isn't importable, so add the repo root if it's there. None if it can't be
+    found (the agreement stats are then reported as null)."""
+    try:
+        from training.actions import encode_arrays
+        return encode_arrays
+    except ImportError:
+        root = str(Path(__file__).resolve().parents[2])
+        if (Path(root) / "training" / "actions.py").is_file() and root not in sys.path:
+            sys.path.append(root)
+            try:
+                from training.actions import encode_arrays
+                return encode_arrays
+            except ImportError:
+                return None
+        return None
+
+
+def agreement(a: np.ndarray, b: np.ndarray, encode: Callable | None) -> dict[str, Any]:
+    """How often two input records for the same port and frames fall in the
+    same action class. `a` and `b` are PLAYER_DTYPE rows (same length)."""
+    n = len(a)
+    out: dict[str, Any] = {"rows_compared": n}
+    if encode is None:
+        return {**out, "main": None, "cstick": None, "buttons": None, "all": None, "all_pct": None}
+    if n == 0:
+        return {**out, "main": 0, "cstick": 0, "buttons": 0, "all": 0, "all_pct": None}
+    ea = encode(*(a[k] for k in INPUT_FIELDS))
+    eb = encode(*(b[k] for k in INPUT_FIELDS))
+    same = [x == y for x, y in zip(ea, eb)]
+    out.update(main=int(same[0].sum()), cstick=int(same[1].sum()), buttons=int(same[2].sum()))
+    both = same[0] & same[1] & same[2]
+    out.update({"all": int(both.sum()), "all_pct": round(100.0 * float(both.mean()), 2)})
+    return out
 
 
 class LogRejected(ValueError):
@@ -156,6 +195,7 @@ class MatchLogger:
         self._times: list[float] = []
         self._inputs: dict[tuple[int, int], Inputs] = {}  # (port, frame) -> inputs, from acks
         self._captured: list[tuple[Inputs | None, Inputs | None]] = []  # per row, port order, from the plugin
+        self._cm: list[tuple[Inputs | None, Inputs | None]] = []  # per row, ControlModule inputs (v4)
         self._summary: MatchSummary | None = None
         self._match_id: str | None = None
         self._started_at: datetime | None = None
@@ -188,6 +228,7 @@ class MatchLogger:
         self._seqs.append(seq)
         self._times.append(now - self._t0)
         self._captured.append(frame.inputs)
+        self._cm.append(frame.cm_inputs)
         self._summary.add(frame)
 
     def record_inputs(self, port: int, frame: int, inputs: Inputs) -> None:
@@ -306,9 +347,11 @@ class MatchLogger:
                 players[name][row, port - 1] = getattr(inp, name)
             players["input_valid"][row, port - 1] = 1
             from_acks[port - 1] += 1
-        # 2. inputs the plugin captured (ground truth: what the fighter read)
+        # 2. inputs the plugin captured at the final input mapping ("fim";
+        # ground truth for human and bot ports: what the fighter read)
         captured = [0, 0]
         mismatches = 0
+        fim_mask = np.zeros((n, N_PORTS), dtype=bool)
         for row, pair in enumerate(self._captured):
             for port, inp in enumerate(pair):
                 if inp is None:
@@ -318,13 +361,53 @@ class MatchLogger:
                 for name in INPUT_FIELDS:
                     players[name][row, port] = getattr(inp, name)
                 players["input_valid"][row, port] = 1
+                fim_mask[row, port] = True
                 captured[port] += 1
+        # 3. ControlModule inputs (v4): the fighter's own read of its
+        # controller. Only source for CPU ports. Where a port already has
+        # inputs from 1 or 2 those win; the two are compared instead.
+        cm_arr = np.zeros((n, N_PORTS), dtype=PLAYER_DTYPE)
+        cm_mask = np.zeros((n, N_PORTS), dtype=bool)
+        for row, pair in enumerate(self._cm):
+            for port, inp in enumerate(pair):
+                if inp is None:
+                    continue
+                for name in INPUT_FIELDS:
+                    cm_arr[name][row, port] = getattr(inp, name)
+                cm_mask[row, port] = True
+        encode = _action_encoder()
+        filled_cm = [0, 0]
+        agree = []
+        for port in range(N_PORTS):
+            fill = cm_mask[:, port] & (players["input_valid"][:, port] == 0)
+            for name in INPUT_FIELDS:
+                players[name][fill, port] = cm_arr[name][fill, port]
+            players["input_valid"][fill, port] = 1
+            filled_cm[port] = int(fill.sum())
+            both = cm_mask[:, port] & fim_mask[:, port]
+            agree.append(agreement(players[both][:, port], cm_arr[both][:, port], encode))
+        sources = []
+        for port in range(N_PORTS):
+            used = [name for name, k in (("ack", from_acks[port]), ("fim", captured[port]),
+                                         ("control_module", filled_cm[port])) if k]
+            sources.append("none" if not used else used[0] if len(used) == 1 else "+".join(used))
         capture = {
             "rows_captured": captured,
             "rows_from_acks": from_acks,
             # acked input vs what the plugin captured on the same frame. Should
             # be 0; anything else means the frame alignment is off.
             "ack_capture_mismatches": mismatches,
+            # v4. Rows where the plugin sent a ControlModule read, and rows of
+            # input_valid that exist only because of it (no ack, no capture).
+            "rows_control_module": [int(cm_mask[:, p].sum()) for p in range(N_PORTS)],
+            "rows_from_control_module": filled_cm,
+            # Which source filled each port's rows: "fim" (final input
+            # mapping capture), "ack", "control_module", joined with "+" if more
+            # than one, "none" if no inputs at all.
+            "port_sources": sources,
+            # Rows where both fim and control module exist, compared after
+            # encoding to training/actions.py classes. Per port.
+            "control_module_agreement": agree,
         }
         return frames, players, capture
 
