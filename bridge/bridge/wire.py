@@ -10,9 +10,10 @@ from dataclasses import dataclass
 from .protocol import FRAME_SIZE, Frame, Inputs, decode_frame, encode_frame
 
 MAGIC = b"SCPU"
-PROTO_VERSION = 3  # v2: heartbeat carries hook health. Kinds 2, 4, 5 added without a bump.
+PROTO_VERSION = 4  # v2: heartbeat carries hook health. Kinds 2, 4, 5 added without a bump.
 # v3: state carries both ports' captured inputs (SSB-13), control status byte 15
 # is the other port's player_idx.
+# v4: state also carries each fighter's ControlModule inputs (CPU ports too).
 
 KIND_STATE = 1
 KIND_INPUT = 2
@@ -74,7 +75,7 @@ def pack_heartbeat(
     )
 
 
-STATE_LEN = HEADER_LEN + FRAME_SIZE  # 168 (v3)
+STATE_LEN = HEADER_LEN + FRAME_SIZE  # 184 (v4)
 
 
 def pack_state(seq: int, frame: Frame, bot_index: int | None = None) -> bytes:

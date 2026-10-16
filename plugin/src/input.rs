@@ -417,6 +417,52 @@ pub const CAP_P2_VALID: u32 = 2;
 /// The PC wrote this port's inputs (the bot, during a session).
 pub const CAP_P1_DRIVEN: u32 = 4;
 pub const CAP_P2_DRIVEN: u32 = 8;
+/// v4: the ControlModule block for this port is valid (read from the
+/// fighter's own ControlModule, works for CPU ports too).
+pub const CAP_P1_CM: u32 = 16;
+pub const CAP_P2_CM: u32 = 32;
+
+/// Float stick (ControlModule, -1..1) to the i8 we log: x127, rounded,
+/// clamped. NaN reads as centered.
+pub fn stick_to_i8(v: f32) -> i8 {
+    if v.is_nan() {
+        return 0;
+    }
+    (v * 127.0).round().clamp(-128.0, 127.0) as i8
+}
+
+/// ControlModule button translation. `check_button_on(boma, CONTROL_PAD_BUTTON_*)`
+/// takes the pad button index below (values from skyline-smash lua_const.rs,
+/// re-checked against the real constants on the first fighter frame, see
+/// `state::verify_pad_indices`); the second column is the MappedInputs bit
+/// from bridge/bridge/buttons.py. The two layouts only agree for attack,
+/// special, jump and guard (indices 0..3), so everything goes through here.
+/// Every pad button has a mapped bit; nothing is dropped.
+pub const PAD_BUTTONS: [(i32, u32, &str); 18] = [
+    (0x0, 0x1, "ATTACK"),
+    (0x1, 0x2, "SPECIAL"),
+    (0x2, 0x4, "JUMP"),
+    (0x3, 0x8, "GUARD"),
+    (0x4, 0x20, "SMASH"),
+    (0x5, 0x400, "APPEAL_HI"),
+    (0x6, 0x1000, "APPEAL_LW"),
+    (0x7, 0x2000, "APPEAL_S_L"),
+    (0x8, 0x4000, "APPEAL_S_R"),
+    (0x9, 0x10, "CATCH"),
+    (0xA, 0x40, "JUMP_MINI"),
+    (0xB, 0x80, "CSTICK_ON"),
+    (0xC, 0x8000, "FLICK_JUMP"),
+    (0xD, 0x100, "STOCK_SHARE"),
+    (0xE, 0x200, "ATTACK_RAW"),
+    (0xF, 0x800, "SPECIAL_RAW"),
+    (0x10, 0x10000, "GUARD_HOLD"),
+    (0x11, 0x20000, "SPECIAL_RAW2"),
+];
+
+/// MappedInputs-layout buttons from a "is this pad button held" query.
+pub fn cm_buttons(mut on: impl FnMut(i32) -> bool) -> u32 {
+    PAD_BUTTONS.iter().fold(0, |acc, &(idx, bit, _)| if on(idx) { acc | bit } else { acc })
+}
 
 /// The final mapped inputs for ports 1 and 2, keyed by the frame that reads
 /// them. Written by the final input mapping hook (one writer per port), read
@@ -783,10 +829,10 @@ mod tests {
 
     // The same hex strings are checked in bridge/tests/test_inputs.py, so a
     // layout change on either side breaks a test.
-    const GOLDEN_INPUT: &str = "534350550300020007000000e8030000ea0300007f81050a05000000";
-    const GOLDEN_ACK: &str = "534350550300040009000000e8030000ea030000e9030000";
+    const GOLDEN_INPUT: &str = "534350550400020007000000e8030000ea0300007f81050a05000000";
+    const GOLDEN_ACK: &str = "534350550400040009000000e8030000ea030000e9030000";
     const GOLDEN_STATUS: &str = concat!(
-        "53435055030005000b000000", "02010700",
+        "53435055040005000b000000", "02010700",
         "e8030000", "03000000", "e2030000", "de030000",
         "01000000", "02000000", "03000000", "04000000",
         "40060000", "06000000",
@@ -1111,5 +1157,29 @@ mod tests {
         w.join().unwrap();
         assert!(ok > 0, "reader never saw a write");
         println!("seqlock: {ok} clean reads, {misses} gave up (writer busy or slot empty)");
+    }
+
+    #[test]
+    fn stick_float_to_i8() {
+        assert_eq!(stick_to_i8(0.0), 0);
+        assert_eq!(stick_to_i8(1.0), 127);
+        assert_eq!(stick_to_i8(-1.0), -127);
+        assert_eq!(stick_to_i8(2.5), 127);
+        assert_eq!(stick_to_i8(-9.0), -128);
+        assert_eq!(stick_to_i8(0.5), 64);
+        assert_eq!(stick_to_i8(f32::NAN), 0);
+    }
+
+    #[test]
+    fn pad_buttons_translate() {
+        let held = |want: &'static [i32]| cm_buttons(|i| want.contains(&i));
+        assert_eq!(held(&[]), 0);
+        assert_eq!(held(&[0, 2]), 0x1 | 0x4);
+        // catch is pad index 9 but MappedInputs bit 0x10
+        assert_eq!(held(&[9]), 0x10);
+        assert_eq!(held(&[0xA, 0x10]), 0x40 | 0x10000);
+        // all distinct single bits
+        let all = cm_buttons(|_| true);
+        assert_eq!(all.count_ones() as usize, PAD_BUTTONS.len());
     }
 }

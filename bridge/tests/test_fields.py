@@ -21,13 +21,14 @@ from bridge.wire import pack_heartbeat, pack_state, unpack_heartbeat, unpack_sta
 # stub smash/skyline types (scratch crate, see the SSB-3 commit message). Same
 # values as rust_frame() below. If the Rust layout changes, regenerate this.
 RUST_STATE_HEX = (
-    "534350550300010009000000d2040000010000002d00000000004841000050400000c0bf"
+    "534350550400010009000000d2040000010000002d00000000004841000050400000c0bf"
     "0000304000002a42000016420300000047000000000000002301efcdab00000000008040"
     "ffffffff01000000030000002d000000000048c1000050400000c03f0000304000002041"
     "000016420300000047000000000000002301efcdab00000000008040ffffffff01000000"
     "03000000"
-    # v3 tail: input_flags 0, both ports uncaptured (zeros)
+    # v3/v4 tail: input_flags 0, both FIM ports and both control module ports unset (zeros)
     "0000000000000000000000000000000000000000"
+    "00000000000000000000000000000000"
 )
 
 

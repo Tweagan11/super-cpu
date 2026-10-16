@@ -133,7 +133,7 @@ class StageMeasurer:
             if not self.seen:
                 self.echo(
                     "[measure] no fighter frames received at all. Is the listener showing frames? "
-                    "(Old .nro shows 'protocol v2, expected v3': rebuild and recopy.)"
+                    "(Old .nro shows 'protocol v3, expected v4': rebuild and recopy.)"
                 )
             else:
                 why = ", ".join(f"{k} {v}" for k, v in self.skipped.items()) or "none"

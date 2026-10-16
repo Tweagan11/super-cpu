@@ -26,7 +26,9 @@ pub const MAGIC: [u8; 4] = *b"SCPU";
 /// expects them, and the heartbeat and state layouts didn't change.
 /// v3: state packet carries both ports' captured inputs (SSB-13), control
 /// status byte 15 is the other port's player_idx.
-pub const PROTO_VERSION: u16 = 3;
+/// v4: state packet appends each fighter's ControlModule inputs (CPU ports
+/// included) after the captured inputs; input_flags bits 4 and 5.
+pub const PROTO_VERSION: u16 = 4;
 
 pub const KIND_STATE: u16 = 1;
 pub const KIND_INPUT: u16 = 2;
@@ -41,8 +43,8 @@ pub const FIGHTER_LEN: usize = 64;
 /// One port's captured inputs: 4 x i8 sticks + u32 buttons.
 pub const INPUTS_LEN: usize = 8;
 /// header + frame (u32) + stage_id (i32) + 2 fighters + input_flags (u32)
-/// + 2 captured inputs
-pub const STATE_LEN: usize = HEADER_LEN + 8 + 2 * FIGHTER_LEN + 4 + 2 * INPUTS_LEN;
+/// + 2 captured inputs (final input mapping) + 2 control module inputs (v4)
+pub const STATE_LEN: usize = HEADER_LEN + 8 + 2 * FIGHTER_LEN + 4 + 4 * INPUTS_LEN;
 
 const HEARTBEAT_EVERY: Duration = Duration::from_millis(500);
 const RETRY_AFTER: Duration = Duration::from_secs(5);
@@ -106,7 +108,9 @@ pub fn state_packet(seq: u32, s: &FrameState) -> [u8; STATE_LEN] {
     let at = 20 + 2 * FIGHTER_LEN;
     buf[at..at + 4].copy_from_slice(&s.input_flags.to_le_bytes());
     write_inputs(&mut buf[at + 4..at + 4 + INPUTS_LEN], &s.inputs[0]);
-    write_inputs(&mut buf[at + 4 + INPUTS_LEN..STATE_LEN], &s.inputs[1]);
+    write_inputs(&mut buf[at + 4 + INPUTS_LEN..at + 4 + 2 * INPUTS_LEN], &s.inputs[1]);
+    write_inputs(&mut buf[at + 4 + 2 * INPUTS_LEN..at + 4 + 3 * INPUTS_LEN], &s.cm_inputs[0]);
+    write_inputs(&mut buf[at + 4 + 3 * INPUTS_LEN..STATE_LEN], &s.cm_inputs[1]);
     buf
 }
 
@@ -392,19 +396,25 @@ mod tests {
                 Inputs { stick_x: 127, stick_y: -128, cstick_x: 0, cstick_y: 40, buttons: 0x5 },
                 Inputs { stick_x: -64, stick_y: 0, cstick_x: 0, cstick_y: 0, buttons: 0x10008 },
             ],
-            input_flags: input::CAP_P1_VALID | input::CAP_P2_VALID | input::CAP_P2_DRIVEN,
+            input_flags: input::CAP_P1_VALID | input::CAP_P2_VALID | input::CAP_P2_DRIVEN
+                | input::CAP_P1_CM | input::CAP_P2_CM,
+            cm_inputs: [
+                Inputs { stick_x: 100, stick_y: -5, cstick_x: -127, cstick_y: 0, buttons: 0x1 | 0x40 },
+                Inputs { stick_x: 0, stick_y: 127, cstick_x: 0, cstick_y: 0, buttons: 0x10 },
+            ],
+            cm_valid: 0,
         }
     }
 
     #[test]
-    fn state_v3_golden() {
-        assert_eq!(STATE_LEN, 168);
+    fn state_v4_golden() {
+        assert_eq!(STATE_LEN, 184);
         let b = state_packet(9, &golden_frame());
         // the v2 part is unchanged apart from the version, so the old
         // golden (bridge/tests/test_fields.py) is a prefix of this one
         assert_eq!(&hex(&b[..4]), "53435055");
-        assert_eq!(&hex(&b[4..6]), "0300");
-        assert_eq!(&hex(&b[148..]), "0b0000007f80002805000000c000000008000100");
-        println!("STATE_V3_HEX {}", hex(&b));
+        assert_eq!(&hex(&b[4..6]), "0400");
+        assert_eq!(&hex(&b[148..]), "3b0000007f80002805000000c00000000800010064fb810041000000007f000010000000");
+        println!("STATE_V4_HEX {}", hex(&b));
     }
 }

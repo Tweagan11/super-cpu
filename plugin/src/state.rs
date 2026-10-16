@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use smash::app::{self, lua_bind::*, utility, BattleObjectModuleAccessor};
 
-use crate::input::{Inputs, CAPTURE};
+use crate::input::{cm_buttons, stick_to_i8, Inputs, CAPTURE, CAP_P1_CM, CAP_P2_CM, PAD_BUTTONS};
 use smash::lib::lua_const::*;
 
 #[repr(C)]
@@ -58,6 +58,12 @@ pub struct FrameState {
     pub inputs: [Inputs; 2],
     /// `input::CAP_*` bits: which of `inputs` are real, and which the PC drove.
     pub input_flags: u32,
+    /// v4: each fighter's own ControlModule inputs this frame (CPU ports
+    /// too), buttons translated to the MappedInputs layout.
+    pub cm_inputs: [Inputs; 2],
+    /// `CAP_P*_CM` bits for the entries read so far this frame; merged into
+    /// `input_flags` when the frame is published.
+    pub cm_valid: u32,
 }
 
 /// Game-thread side of the bridge. Only touched from the frame hook.
@@ -75,7 +81,8 @@ static COLLECTOR: Mutex<Collector> = Mutex::new(Collector {
         fighter_kind: 0, pos_x: 0.0, pos_y: 0.0, vel_x: 0.0, vel_y: 0.0, damage: 0.0,
         shield_hp: 0.0, stocks: 0, status_kind: 0, motion_kind: 0, anim_frame: 0.0,
         facing: 0, jumps_left: 0, flags: 0,
-    }; 2], inputs: [Inputs::NEUTRAL; 2], input_flags: 0 },
+    }; 2], inputs: [Inputs::NEUTRAL; 2], input_flags: 0,
+        cm_inputs: [Inputs::NEUTRAL; 2], cm_valid: 0 },
     last_entry: i32::MAX,
     last_seen: None,
     color_logged: [false; 2],
@@ -135,6 +142,7 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
             return;
         }
         let fighter = read_fighter(acc, entry);
+        let cm = read_control_inputs(acc);
         // The results screen keeps fighters alive in DEMO (victory/clap
         // animations). Not gameplay: don't send it, and don't refresh
         // last_seen, so the next real match is detected as a new one.
@@ -160,7 +168,7 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
             // they're in the ring already. Lock-free read.
             let (inputs, input_flags) = CAPTURE.frame(c.current.frame);
             c.current.inputs = inputs;
-            c.current.input_flags = input_flags;
+            c.current.input_flags = input_flags | c.current.cm_valid;
             if let Some(tx) = SENDER.get() {
                 // never block the game; if the queue is full the frame is dropped
                 if tx.try_send(c.current).is_ok() {
@@ -168,10 +176,14 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
                 }
             }
             c.current.frame = c.current.frame.wrapping_add(1);
+            c.current.cm_inputs = [Inputs::NEUTRAL; 2];
+            c.current.cm_valid = 0;
         }
         c.last_seen = Some(now);
         c.last_entry = entry;
         c.current.fighters[entry as usize] = fighter;
+        c.current.cm_inputs[entry as usize] = cm;
+        c.current.cm_valid |= if entry == 0 { CAP_P1_CM } else { CAP_P2_CM };
         // Same global the modpack reads mid-match (save_states.rs, tech.rs).
         // The stage can't change during a match, but reading it every
         // frame is one cheap call and avoids caring about match start order.
@@ -191,6 +203,50 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
                 c.current.stage_id
             );
         }
+    }
+}
+
+/// This fighter's inputs as its ControlModule sees them (v4). Same calls the
+/// modpack hooks: get_stick_x/y (mod.rs), check_button_on (mod.rs,
+/// full_hop.rs); get_sub_stick_x/y are the c-stick pair next to them in
+/// skyline-smash. Sticks are absolute (not flipped by facing). Runs after the
+/// fighter's own control update, so these are the values it just acted on.
+unsafe fn read_control_inputs(acc: &mut BattleObjectModuleAccessor) -> Inputs {
+    verify_pad_indices();
+    Inputs {
+        stick_x: stick_to_i8(ControlModule::get_stick_x(acc)),
+        stick_y: stick_to_i8(ControlModule::get_stick_y(acc)),
+        cstick_x: stick_to_i8(ControlModule::get_sub_stick_x(acc)),
+        cstick_y: stick_to_i8(ControlModule::get_sub_stick_y(acc)),
+        buttons: cm_buttons(|idx| ControlModule::check_button_on(acc, idx)),
+    }
+}
+
+/// Once: the pad button indices in `input::PAD_BUTTONS` are copied from
+/// skyline-smash; compare them with the real `CONTROL_PAD_BUTTON_*` values
+/// and log any difference (it would silently scramble CPU buttons).
+fn verify_pad_indices() {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let actual: [i32; 18] = [
+        *CONTROL_PAD_BUTTON_ATTACK, *CONTROL_PAD_BUTTON_SPECIAL, *CONTROL_PAD_BUTTON_JUMP,
+        *CONTROL_PAD_BUTTON_GUARD, *CONTROL_PAD_BUTTON_SMASH, *CONTROL_PAD_BUTTON_APPEAL_HI,
+        *CONTROL_PAD_BUTTON_APPEAL_LW, *CONTROL_PAD_BUTTON_APPEAL_S_L, *CONTROL_PAD_BUTTON_APPEAL_S_R,
+        *CONTROL_PAD_BUTTON_CATCH, *CONTROL_PAD_BUTTON_JUMP_MINI, *CONTROL_PAD_BUTTON_CSTICK_ON,
+        *CONTROL_PAD_BUTTON_FLICK_JUMP, *CONTROL_PAD_BUTTON_STOCK_SHARE, *CONTROL_PAD_BUTTON_ATTACK_RAW,
+        *CONTROL_PAD_BUTTON_SPECIAL_RAW, *CONTROL_PAD_BUTTON_GUARD_HOLD, *CONTROL_PAD_BUTTON_SPECIAL_RAW2,
+    ];
+    let mut bad = 0;
+    for (got, (want, _, name)) in actual.iter().zip(PAD_BUTTONS.iter()) {
+        if got != want {
+            bad += 1;
+            crate::log::log(format!("control module: pad button {name} is {got:#x}, table says {want:#x}"));
+        }
+    }
+    if bad == 0 {
+        crate::log::log("control module: pad button table matches the game constants");
     }
 }
 

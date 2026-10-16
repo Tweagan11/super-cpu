@@ -76,12 +76,14 @@ Each `ports` entry: `slot` (1 or 2), `fighter_kind`, `fighter_name`, `controller
 | buttons | u32 | `bridge/buttons.py` bits |
 | input_valid | u8 | 1 if this row's inputs were recorded, 0 if zero-filled |
 
-Inputs (SSB-13): each row's input columns are the final mapped inputs that port's fighter read **on that frame**, with `input_valid = 1`. Rows with `input_valid = 0` are zero-filled and mean "unknown", not "neutral". Two sources, in this order:
+Inputs (SSB-13): each row's input columns are the final mapped inputs that port's fighter read **on that frame**, with `input_valid = 1`. Rows with `input_valid = 0` are zero-filled and mean "unknown", not "neutral". Three sources, in this order (a later one only fills rows the earlier ones left invalid):
 
 1. **The bot's acks** (`bridge.run --log` only). `bridge.run` remembers what it sent for each state frame; when the plugin acks `(for_frame, applied_frame)`, `MatchLogger.record_inputs(bot_port, applied_frame, inputs)` puts it on the frame it took effect, not the frame it was decided on. Repeats and neutral frames aren't acked, so on their own they stay invalid.
 2. **The plugin's capture** (state packet v3, `docs/protocol.md`). Both ports, every frame, including what the bot really got on repeat and neutral frames. This wins when both exist.
 
-So with a v3 plugin both ports are filled almost every frame (frame 0 of each match is never captured), human or bot, and the acks are a cross-check.
+3. **The control module** (state packet v4). The fighter's own read of its controller, translated to the buttons.py bits (`docs/protocol.md`). This is the only source for CPU ports, which the final input mapping never sees. It never overrides 1 or 2; where both exist the two are compared (below).
+
+So with a v4 plugin both ports are filled almost every frame, human, bot or CPU, and the acks and the control module are cross-checks. The human FIM capture stays the label source for human ports until the control module translation is validated on hardware.
 
 `input_capture` header:
 
@@ -95,6 +97,10 @@ So with a v3 plugin both ports are filled almost every frame (frame 0 of each ma
 | `rows_captured` | rows per port filled from the plugin's capture |
 | `rows_from_acks` | rows per port filled from acks |
 | `ack_capture_mismatches` | rows where an acked input and the captured one disagree. Should be 0; anything else means the frame alignment is off |
+| `port_sources` | per port, which source(s) filled the rows: `fim`, `ack`, `control_module`, joined with `+` when several (`ack+fim` for the bot), `none` if the port has no inputs. A CPU port in a CPU vs CPU match is `control_module` |
+| `rows_control_module` | rows per port where the plugin sent a control module read (v4) |
+| `rows_from_control_module` | rows per port whose `input_valid` exists only because of it (no ack, no capture) |
+| `control_module_agreement` | per port, rows where both the FIM capture and the control module exist, compared after encoding each to `training/actions.py` classes: `rows_compared`, `main`, `cstick`, `buttons` (rows in the same class on that head), `all` (all three heads agree) and `all_pct`. null values mean `training` couldn't be imported; `all_pct` is null when nothing was compared. CPU ports always have `rows_compared` 0. For a human port `all_pct` near 100 means the translation is right; a low `buttons` number points at a wrong button mapping, a low `main`/`cstick` at stick scaling or a swapped axis |
 
 `frame_at()` rebuilds `Frame.inputs` from valid rows (None elsewhere).
 

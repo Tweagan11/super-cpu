@@ -15,8 +15,11 @@ FRAME_HEADER_FMT = "<Ii"
 FIGHTER_SIZE = struct.calcsize(FIGHTER_FMT)
 # v3 (SSB-13): after the fighters, input_flags then each port's captured
 # final mapped inputs (4 x i8 sticks, u32 buttons), port 1 first.
-CAPTURE_FMT = "<I4bI4bI"
-CAPTURE_SIZE = struct.calcsize(CAPTURE_FMT)  # 20
+# v4: then each port's ControlModule inputs (the fighter's own read of its
+# controller, CPU ports too), same 8-byte shape, buttons already translated
+# to the MappedInputs bits.
+CAPTURE_FMT = "<I4bI4bI4bI4bI"
+CAPTURE_SIZE = struct.calcsize(CAPTURE_FMT)  # 36
 FRAME_SIZE = struct.calcsize(FRAME_HEADER_FMT) + 2 * FIGHTER_SIZE + CAPTURE_SIZE
 
 # input_flags bits (plugin/src/input.rs CAP_*)
@@ -24,6 +27,8 @@ CAP_P1_VALID = 1
 CAP_P2_VALID = 2
 CAP_P1_DRIVEN = 4
 CAP_P2_DRIVEN = 8
+CAP_P1_CM = 16  # v4: the ControlModule block for port 1 is valid
+CAP_P2_CM = 32
 
 # The input packet layout lives in wire.py (pack_input), next to the header.
 
@@ -81,6 +86,9 @@ class Frame:
     inputs: tuple[Inputs | None, Inputs | None] = (None, None)
     # True where the PC (the bot) wrote that port's inputs, port order.
     driven: tuple[bool, bool] = (False, False)
+    # v4: what each port's fighter read from its ControlModule this frame, port
+    # order, None = not read. Present for CPU ports, which have no FIM capture.
+    cm_inputs: tuple[Inputs | None, Inputs | None] = (None, None)
 
     @property
     def by_port(self) -> tuple[Fighter, Fighter]:
@@ -110,8 +118,12 @@ def decode_frame(buf: bytes, offset: int = 0, bot_index: int = 0) -> Frame:
         Inputs(*v[6:11]) if flags & CAP_P2_VALID else None,
     )
     driven = (bool(flags & CAP_P1_DRIVEN), bool(flags & CAP_P2_DRIVEN))
+    cm = (
+        Inputs(*v[11:16]) if flags & CAP_P1_CM else None,
+        Inputs(*v[16:21]) if flags & CAP_P2_CM else None,
+    )
     bot, opp = (p2, p1) if bot_index == 1 else (p1, p2)
-    return Frame(frame, stage_id, bot, opp, 1 if bot_index == 1 else 0, inputs, driven)
+    return Frame(frame, stage_id, bot, opp, 1 if bot_index == 1 else 0, inputs, driven, cm)
 
 
 def capture_flags(f: Frame) -> int:
@@ -124,6 +136,10 @@ def capture_flags(f: Frame) -> int:
         flags |= CAP_P1_DRIVEN
     if f.driven[1]:
         flags |= CAP_P2_DRIVEN
+    if f.cm_inputs[0] is not None:
+        flags |= CAP_P1_CM
+    if f.cm_inputs[1] is not None:
+        flags |= CAP_P2_CM
     return flags
 
 
@@ -141,9 +157,13 @@ def encode_frame(f: Frame, bot_index: int | None = None) -> bytes:
     p1, p2 = (f.opponent, f.bot) if bot_index == 1 else (f.bot, f.opponent)
     a = f.inputs[0] or Inputs()
     b = f.inputs[1] or Inputs()
+    ca = f.cm_inputs[0] or Inputs()
+    cb = f.cm_inputs[1] or Inputs()
     tail = struct.pack(
         CAPTURE_FMT, capture_flags(f),
         a.stick_x, a.stick_y, a.cstick_x, a.cstick_y, a.buttons & 0xFFFFFFFF,
         b.stick_x, b.stick_y, b.cstick_x, b.cstick_y, b.buttons & 0xFFFFFFFF,
+        ca.stick_x, ca.stick_y, ca.cstick_x, ca.cstick_y, ca.buttons & 0xFFFFFFFF,
+        cb.stick_x, cb.stick_y, cb.cstick_x, cb.cstick_y, cb.buttons & 0xFFFFFFFF,
     )
     return struct.pack(FRAME_HEADER_FMT, f.frame, f.stage_id) + fighter(p1) + fighter(p2) + tail

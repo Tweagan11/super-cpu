@@ -8,7 +8,7 @@ class LogPacketTests(unittest.TestCase):
     def test_matches_rust_layout(self):
         # plugin/src/log.rs packet_layout test: seq 7, id 3, "hi"
         b = pack_log(7, 3, "hi")
-        self.assertEqual(b.hex(), "53435055" "0300" "0600" "07000000" "03000000" "0200" "6869")
+        self.assertEqual(b.hex(), "53435055" "0400" "0600" "07000000" "03000000" "0200" "6869")
         line = unpack_log(b)
         self.assertEqual((line.id, line.text), (3, "hi"))
 

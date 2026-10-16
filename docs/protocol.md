@@ -19,7 +19,7 @@ PC to plugin: the plugin sends from one socket with a random port and receives i
 
 Kinds 2, 4 and 5 were added in v2 without a version bump. The heartbeat and state layouts didn't change, older bridges just ignore kinds they don't know, and an older plugin never receives anything.
 
-v3 (SSB-13) appended captured inputs to the state packet and gave control status byte 15 a meaning. Plugin and bridge have to be on the same version; a v2 plugin's packets are refused with "protocol v2, expected v3" (rebuild and recopy the `.nro`).
+v3 (SSB-13) appended captured inputs to the state packet and gave control status byte 15 a meaning. v4 appended each fighter's ControlModule inputs to the state packet (CPU ports included). Plugin and bridge have to be on the same version; an older plugin's packets are refused with "protocol v3, expected v4" (rebuild and recopy the `.nro`).
 
 ## Heartbeat (kind 3, plugin to PC) - built
 
@@ -40,7 +40,7 @@ At boot the plugin reads the running display version (`nn::oe::GetDisplayVersion
 
 ## State (kind 1, plugin to PC) - built
 
-Header, then `frame` (u32), `stage_id` (i32), then two FighterState blocks, then the captured inputs (v3, below). 168 bytes, one per game frame during a match.
+Header, then `frame` (u32), `stage_id` (i32), then two FighterState blocks, then the captured inputs (v3) and the control module inputs (v4), both below. 184 bytes, one per game frame during a match.
 
 Index 0 is always port 1 and index 1 is port 2. Which one is the bot is the plugin's `bot_port` (reported in the control status packet); the bridge's `--bot-port` picks it on the PC side (`decode_frame(..., bot_index=bot_port - 1)`). `frame` restarts at 0 each match.
 
@@ -102,18 +102,43 @@ Right after the two fighters:
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| input_flags | u32 | bit 0 port 1 captured, bit 1 port 2 captured, bit 2 port 1 driven by the PC, bit 3 port 2 driven by the PC |
+| input_flags | u32 | bit 0 port 1 captured, bit 1 port 2 captured, bit 2 port 1 driven by the PC, bit 3 port 2 driven by the PC, bit 4 port 1 control module block valid (v4), bit 5 port 2 control module block valid (v4) |
 | port 1 stick_x, stick_y, cstick_x, cstick_y | i8 | the final `MappedInputs` port 1's fighter read on this frame |
 | port 1 buttons | u32 | mapped button bits (`bridge/bridge/buttons.py`) |
 | port 2 sticks, buttons | 4 x i8, u32 | same for port 2 |
+| port 1 control module inputs | 4 x i8, u32 | v4, see below |
+| port 2 control module inputs | 4 x i8, u32 | v4, see below |
 
-20 bytes. A port whose bit isn't set is all zeros and means "not captured" (bridge side: `Frame.inputs[i] is None`), not neutral. "Driven" means the plugin wrote the PC's input over the controller that frame (fresh, a repeat, or neutral). For the bot's port that's exactly what was applied, so repeats and neutral frames are known too.
+36 bytes (v4; 20 in v3). A port whose bit isn't set is all zeros and means "not captured" (bridge side: `Frame.inputs[i] is None`), not neutral. "Driven" means the plugin wrote the PC's input over the controller that frame (fresh, a repeat, or neutral). For the bot's port that's exactly what was applied, so repeats and neutral frames are known too.
 
 How it's captured (`plugin/src/input.rs`, `Capture`): the final input mapping hook already runs for every player every frame. After the original runs (and after we overwrite the bot's input, if we do), it writes the result into a small lock-free ring, keyed by the frame those inputs take effect on (`live_frame + 1`, the same target the input path uses). When the fighter hook wraps and publishes frame N, it reads frame N's entry from the ring. The ring is 4 seqlock slots per port: one writer (the input hook) and one reader (the fighter hook); a reader that lands mid-write just reports "not captured" for that frame. No locks, no allocation, no waiting. Frames with no live match (`live_frame()` None) or where `live_frame()` lost its try_lock aren't captured.
 
 Frame numbers line up by construction: the input captured as frame N is what the fighters read during the update that state.rs numbers N, the same rule the input packet's `apply_at` uses. The first frame of a match (frame 0) is never captured because there's no previous frame for `live_frame()` to report yet.
 
 `player_idx` is the port, 0-based (confirmed on hardware 2026-10-16: it follows the port, not the controller). Port `bot_port` uses `bot_player_idx` (`fim_player_idx` or `bot_port - 1`); the other port uses its own index, and if the bot took that one, the two swap. The control status packet reports both indexes, and the bridge writes them in every match log header so the data can be fixed up later if the mapping turns out wrong.
+
+### Control module inputs (v4)
+
+Why: the final input mapping hook (above) only sees human controllers. CPU fighters (level 9 CPU vs CPU matches, for unattended imitation-learning data) get their input from the AI, so their port has no capture. Every fighter, human or CPU, reads its input through its own `ControlModule`, so `plugin/src/state.rs::read_control_inputs` asks it, in the fighter hook, right after the fighter's per-frame control update (so these are the values that fighter just acted on, same frame number as the state it's sent with, no ring needed):
+
+- main stick: `ControlModule::get_stick_x/_y`, c-stick: `get_sub_stick_x/_y`. Floats in -1..1, sent as `round(v * 127)` clamped to i8 (`input::stick_to_i8`). These are absolute, not flipped by facing, and they are the clamped values the game logic uses, not the raw hardware stick, so they can differ by a few units from the MappedInputs sticks (deadzone and range handling); `training/actions.py` classes absorb that.
+- buttons: `ControlModule::check_button_on(boma, CONTROL_PAD_BUTTON_*)` for each pad button. `CONTROL_PAD_BUTTON_*` values are indexes 0 to 0x11, not the MappedInputs bits, and the layouts only agree for attack, special, jump, guard. `input::PAD_BUTTONS` is the translation table (the same one is in the plugin tests):
+
+| Pad button (index) | buttons.py bit |
+| --- | --- |
+| ATTACK 0x0, SPECIAL 0x1, JUMP 0x2, GUARD 0x3 | ATTACK, SPECIAL, JUMP, GUARD |
+| SMASH 0x4 | SMASH |
+| APPEAL_HI 0x5, APPEAL_LW 0x6, APPEAL_S_L 0x7, APPEAL_S_R 0x8 | APPEAL_HI, APPEAL_LW, APPEAL_SL, APPEAL_SR |
+| CATCH 0x9 | CATCH |
+| JUMP_MINI 0xA | JUMP_MINI |
+| CSTICK_ON 0xB, FLICK_JUMP 0xC, STOCK_SHARE 0xD | CSTICK_ON, FLICK_JUMP, STOCK_SHARE |
+| ATTACK_RAW 0xE, SPECIAL_RAW 0xF, GUARD_HOLD 0x10, SPECIAL_RAW2 0x11 | ATTACK_RAW, SPECIAL_RAW, GUARD_HOLD, SPECIAL_RAW2 |
+
+Every pad button maps; nothing is dropped. What can't be promised is that the game *sets* each bit the way the final input mapping does: some (the `*_RAW` and `GUARD_HOLD` duplicates, `SMASH`, `FLICK_JUMP`, `CSTICK_ON`) are derived from the mapped input, and the CPU's AI may not set derived bits at all. Those are all folded or dropped by `training/actions.py` anyway (`canonical_buttons`, `KEPT_BITS`), which is why the logger compares in action-class space. The table's indexes are copied from skyline-smash; on the first fighter frame the plugin compares them with the real `CONTROL_PAD_BUTTON_*` constants and logs "pad button table matches the game constants" or each mismatch.
+
+Why a second block instead of reusing the capture slots with a source flag: the human-port agreement check (log header, `docs/logging-schema.md`) needs both sources for the same port and frame at once, and we need to know the translation is right on hardware before trusting it for CPU ports. Reusing the slots would make that impossible, would turn "valid" into a per-port two-way choice, and would hide a bad button mapping inside data that looks the same as ground truth. The second block costs 16 bytes per frame (184 vs 168) and leaves the v3 layout as a prefix (apart from the version field). A port is either in the FIM block (human, or the bot), the control module block (everyone), or both.
+
+Frame-end bookkeeping: `FrameState.cm_valid` collects `CAP_P1_CM`/`CAP_P2_CM` as each entry's fighter reports in; it is merged into `input_flags` when the frame is published and cleared for the next one. A port whose fighter didn't run its hook that frame (KO, respawn limbo) isn't flagged and arrives as `None`.
 
 Why extend the state packet instead of a separate "inputs" packet kind: it's 20 more bytes on a packet that already goes out every frame, against a 32+ byte packet and a second send per frame (more syscalls on the network thread, a second thing to lose). The inputs and the state for a frame arrive together or not at all, so there's no PC-side join by frame number, no reorder buffer, and nothing to get out of step. And every consumer (logger, policy, listener) already decodes state, so they get inputs for free. The cost is the version bump, which was needed for the layout change anyway.
 
@@ -203,6 +228,6 @@ forgets the ids when the heartbeat's uptime goes backwards (plugin restart).
 
 ## Golden bytes
 
-`plugin/src/input.rs` and `bridge/tests/test_inputs.py` both check the same hex strings for an input, an ack and a control status packet, and `plugin/src/net.rs` (`state_v3_golden`) and `bridge/tests/test_capture.py` check the v3 state packet with captured inputs, so a layout change on one side fails the other side's tests.
+`plugin/src/input.rs` and `bridge/tests/test_inputs.py` both check the same hex strings for an input, an ack and a control status packet, and `plugin/src/net.rs` (`state_v4_golden`) and `bridge/tests/test_capture.py` check the v4 state packet with captured and control module inputs, so a layout change on one side fails the other side's tests.
 
 Any layout change touches `plugin/src/net.rs`, `plugin/src/input.rs` or `plugin/src/state.rs`, the matching file in `bridge/bridge/`, and this doc in the same commit, and bumps `proto_version`.

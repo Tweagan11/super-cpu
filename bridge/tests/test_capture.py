@@ -1,4 +1,4 @@
-"""SSB-13 input capture (state packet v3), bot port threading, bot input
+"""SSB-13 input capture (state packet v3/v4), bot port threading, bot input
 logging from acks, and bridge.run + logger + eval in one process."""
 import socket
 import tempfile
@@ -33,34 +33,37 @@ from bridge.wire import (
 from .helpers import fighter, frame
 from .test_fields import rust_fighter
 
-# plugin/src/net.rs tests::state_v3_golden (printed by the host test crate).
-RUST_STATE_V3_HEX = (
-    "534350550300010009000000d2040000010000002d00000000004841000050400000c0bf"
+# plugin/src/net.rs tests::state_v4_golden (printed by the host test crate).
+RUST_STATE_V4_HEX = (
+    "534350550400010009000000d2040000010000002d00000000004841000050400000c0bf"
     "0000304000002a42000016420300000047000000000000002301efcdab00000000008040"
     "ffffffff01000000030000002d000000000048c1000050400000c03f0000304000002041"
     "000016420300000047000000000000002301efcdab00000000008040ffffffff01000000"
-    "03000000"
-    "0b0000007f80002805000000c000000008000100"
+    "030000003b0000007f80002805000000c00000000800010064fb810041000000007f0000"
+    "10000000"
 )
 P1_IN = Inputs(127, -128, 0, 40, buttons.ATTACK | buttons.JUMP)
 P2_IN = Inputs(-64, 0, 0, 0, buttons.GUARD | buttons.GUARD_HOLD)
+CM1_IN = Inputs(100, -5, -127, 0, buttons.ATTACK | buttons.JUMP_MINI)
+CM2_IN = Inputs(0, 127, 0, 0, buttons.CATCH)
 
 
 def golden_state() -> Frame:
     return Frame(1234, 1, rust_fighter(42.5, 1.0), rust_fighter(10.0, -1.0),
-                 inputs=(P1_IN, P2_IN), driven=(False, True))
+                 inputs=(P1_IN, P2_IN), driven=(False, True), cm_inputs=(CM1_IN, CM2_IN))
 
 
 class WireTests(unittest.TestCase):
-    def test_v3_matches_rust(self):
-        self.assertEqual(STATE_LEN, 168)
-        self.assertEqual(pack_state(9, golden_state()).hex(), RUST_STATE_V3_HEX)
-        _, f = unpack_state(bytes.fromhex(RUST_STATE_V3_HEX))
+    def test_v4_matches_rust(self):
+        self.assertEqual(STATE_LEN, 184)
+        self.assertEqual(pack_state(9, golden_state()).hex(), RUST_STATE_V4_HEX)
+        _, f = unpack_state(bytes.fromhex(RUST_STATE_V4_HEX))
         self.assertEqual(f, golden_state())
         self.assertEqual((f.bot_inputs, f.opponent_inputs), (P1_IN, P2_IN))
+        self.assertEqual(f.cm_inputs, (CM1_IN, CM2_IN))
 
     def test_inputs_stay_in_port_order(self):
-        _, f = unpack_state(bytes.fromhex(RUST_STATE_V3_HEX), bot_index=1)
+        _, f = unpack_state(bytes.fromhex(RUST_STATE_V4_HEX), bot_index=1)
         self.assertEqual(f.inputs, (P1_IN, P2_IN))
         self.assertEqual((f.bot_inputs, f.opponent_inputs), (P2_IN, P1_IN))
         self.assertEqual(f.driven, (False, True))
@@ -70,7 +73,7 @@ class WireTests(unittest.TestCase):
         self.assertEqual(f.inputs, (None, P2_IN))
 
     def test_control_status_mapping(self):
-        s = ControlStatus(Header(3, 5, 1), 2, 0, 16 | 1, other_player_idx=1)
+        s = ControlStatus(Header(4, 5, 1), 2, 0, 16 | 1, other_player_idx=1)
         back = unpack_control_status(pack_control_status(1, s))
         self.assertEqual(back, s)
         self.assertTrue(back.fim_override)
@@ -149,7 +152,7 @@ class LoggedInputTests(unittest.TestCase):
         frames = [Frame(f.frame, f.stage_id, f.bot, f.opponent,
                         inputs=(human_inputs(i, -1), None if i == 3 else human_inputs(i, 1)))
                   for i, f in enumerate(frames)]
-        st = ControlStatus(Header(3, 5, 0), 2, 0, 16 | 1, other_player_idx=1)
+        st = ControlStatus(Header(4, 5, 0), 2, 0, 16 | 1, other_player_idx=1)
         feed(w, frames, status=st)
         m = load_match(next(self.dir.glob("*.npz")))
         p1, p2 = m.port(1), m.port(2)
@@ -168,6 +171,46 @@ class LoggedInputTests(unittest.TestCase):
                                           "verified": False})
         self.assertEqual(cap["rows_captured"], [6, 5])
         self.assertEqual(h["schema_version"], 1)
+
+    def test_cpu_port_gets_inputs_from_control_module_and_human_port_agreement(self):
+        """Port 1 is a human (fim + control module), port 2 a CPU (control module only)."""
+        lg = MatchLogger(out_dir=self.dir, echo=lambda m: None)
+        w = MatchWatcher([lg], bot_port=2)
+        n = 10
+        frames = []
+        for i in range(n):
+            fim = human_inputs(i, -1)
+            # control module agrees except on frames 0..1, where it says jump
+            # instead of whatever the human did (a different button class)
+            cm1 = fim if i >= 2 else Inputs(fim.stick_x, fim.stick_y, fim.cstick_x, fim.cstick_y, buttons.JUMP)
+            cm2 = human_inputs(i, 1)
+            frames.append(Frame(i, 1, fighter(), fighter(), inputs=(fim, None), cm_inputs=(cm1, cm2)))
+        feed(w, frames)
+        m = load_match(next(self.dir.glob("*.npz")))
+        p1, p2 = m.port(1), m.port(2)
+        self.assertEqual(list(p2["input_valid"]), [1] * n)
+        for i in range(n):
+            want = human_inputs(i, 1)
+            self.assertEqual((int(p2["stick_x"][i]), int(p2["buttons"][i])), (want.stick_x, want.buttons))
+        # the human port keeps the fim values, not the control module's
+        self.assertEqual(int(p1["buttons"][0]), human_inputs(0, -1).buttons)
+        h = m.header
+        self.assertEqual([p["inputs_present"] for p in h["ports"]], [True, True])
+        cap = h["input_capture"]
+        self.assertEqual(cap["port_sources"], ["fim", "control_module"])
+        self.assertEqual(cap["rows_captured"], [n, 0])
+        self.assertEqual(cap["rows_control_module"], [n, n])
+        self.assertEqual(cap["rows_from_control_module"], [0, n])
+        a1, a2 = cap["control_module_agreement"]
+        self.assertEqual(a1["rows_compared"], n)
+        self.assertEqual(a1["all"], n - 2)  # frames 0 and 1 have an attack-class difference
+        self.assertEqual(a1["all_pct"], 80.0)
+        self.assertEqual(a2["rows_compared"], 0)
+
+    def test_control_module_translation_round_trip(self):
+        _, f = unpack_state(pack_state(1, Frame(5, 1, fighter(), fighter(), cm_inputs=(None, CM2_IN))))
+        self.assertEqual(f.cm_inputs, (None, CM2_IN))
+        self.assertEqual(f.inputs, (None, None))
 
     def test_no_control_status_says_so(self):
         lg = MatchLogger(out_dir=self.dir, echo=lambda m: None)
@@ -257,6 +300,10 @@ class OneProcessTests(unittest.TestCase):
                 self.assertEqual(cap["mapping"]["player_idx_by_port"], [0, 1])
                 self.assertGreater(cap["rows_from_acks"][1], 60)
                 self.assertEqual(cap["ack_capture_mismatches"], 0)
+                # v4: control module block on both ports, same as the fim capture in the fake
+                self.assertGreater(min(cap["rows_control_module"]), 60)
+                self.assertEqual(cap["port_sources"], ["fim", "ack+fim"])
+                self.assertEqual([x["all_pct"] for x in cap["control_module_agreement"]], [100.0, 100.0])
                 # human side is exactly what the fake's "controller" produced
                 fr = m.frames["frame"]
                 p1 = m.port(1)
