@@ -37,6 +37,13 @@ increases count. Stocks read 0 for the first few frames of a match on
 hardware: rewards stay 0 and nothing is tracked until both fighters show
 stocks > 0, and a stock only counts as lost when it goes down from a value > 0.
 
+Shaping terms (RewardConfig, documented in training/README.md "Reward terms"):
+edgeguard KO, spike, combo extension, recovery / last jump, and potential-based
+stage control. Each has a weight, a per-match cap and per-term totals in
+matches.csv; all are multiplied by a match-level decay (`shaping_multiplier`)
+that the base reward is exempt from. The stage control term is
+gamma * Phi(s') - Phi(s) plus a terminal -Phi at a real match end.
+
 ## Delay and credit assignment
 
 The decision made on state frame t is applied on frame t + delay (the bridge
@@ -76,6 +83,7 @@ from __future__ import annotations
 import csv
 import dataclasses
 import json
+import math
 import os
 import queue
 import threading
@@ -93,6 +101,7 @@ import torch.nn.functional as F
 
 from bridge.matches import game_over, winner_port
 from bridge.protocol import Fighter, Frame, Inputs
+from bridge.statuses import STATUS_NAMES
 
 from . import actions as A
 from .features import _layout_of, live_features
@@ -126,7 +135,10 @@ def _from_env(cls, prefix: str, **overrides):
 
 @dataclass(frozen=True)
 class RewardConfig:
-    """Per-frame reward weights. Env: SCPU_RL_REWARD_<FIELD>."""
+    """Per-frame reward weights. Env: SCPU_RL_REWARD_<FIELD>.
+
+    The first block is the base reward. The shaping terms below it are
+    documented in training/README.md ("Reward terms") and in RewardTracker."""
 
     damage_dealt: float = 0.01         # per percent of damage the opponent took
     damage_taken: float = 0.01         # per percent the bot took (subtracted)
@@ -139,12 +151,117 @@ class RewardConfig:
     offstage_below: float = 10.0       # also offstage when this far below the ground (stage units)
     effect_lag: int = 0                # extra frames between "applied" and "visible in state" (credit shift)
 
+    # 1. Edgeguard KO: opponent loses a stock after >= edgeguard_min_frames of free (not in hitstun) offstage time.
+    edgeguard_bonus: float = 2.0       # full bonus: the bot hit them offstage within edgeguard_window frames of the KO
+    edgeguard_guard_frac: float = 0.5  # fraction paid when the bot only stood onstage near the ledge, no hit
+    edgeguard_cap: float = 6.0         # per-match total
+    edgeguard_min_frames: int = 30     # free offstage frames before a KO counts as an edgeguard
+    edgeguard_window: int = 180        # frames before the KO in which the hit / the ledge guarding must have happened
+    edgeguard_near: float = 40.0       # onstage within this of the ledge (horizontal) counts as guarding it
+    # 2. Spike / meteor: opponent hit while offstage and flung down.
+    spike_bonus: float = 1.5
+    spike_cap: float = 4.5
+    spike_vel: float = 2.5             # vel_y must be <= -spike_vel (units/frame) after the hit
+    spike_delta: float = 1.0           # ... and at least this much lower than just before the hit
+    spike_window: int = 3              # frames after the hit in which the velocity is checked
+    # 3. Combo extension: per extra hit while the opponent is still in hitstun.
+    combo_bonus: float = 0.1           # times (hits so far in the combo - 1), at most combo_max_len
+    combo_max_len: int = 5
+    combo_cap: float = 3.0
+    combo_min_gap: int = 4             # frames between hits for them to count as separate hits
+    # 4. Recovery: back on stage (or on the ledge) after a long excursion; penalty for the last jump far out.
+    recovery_bonus: float = 0.5
+    recovery_cap: float = 2.0
+    recovery_min_frames: int = 30      # offstage frames before getting back pays
+    recovery_cooldown: int = 180       # frames between two recovery payouts (ledge-drop loops)
+    last_jump_penalty: float = 0.3     # subtracted when jumps_left hits 0 offstage and far from the ledge
+    last_jump_cap: float = 1.0
+    last_jump_far: float = 40.0        # distance to the ledge (stage units) that counts as far
+    # 5. Stage control, potential-based (Ng et al. 1999): Phi = weight * (closeness(opp) - closeness(bot)).
+    stage_control_weight: float = 0.05
+    stage_control_cap: float = 2.0     # safety net on |total|; wide enough to never bind (binding breaks the guarantee)
+    stage_control_scale: float = 60.0  # closeness = 1 at the ledge (or beyond), 0 this far inside it
+    # Decay of terms 1-5 (not the base reward): multiplier 1 -> shaping_floor over shaping_decay_matches matches.
+    shaping_decay_matches: int = 200   # 0: no decay
+    shaping_floor: float = 0.2
+
+
+def shaping_multiplier(cfg: RewardConfig, matches: int) -> float:
+    """Linear decay from 1 (no matches played) to cfg.shaping_floor at
+    cfg.shaping_decay_matches matches, flat after that."""
+    if cfg.shaping_decay_matches <= 0:
+        return 1.0
+    x = min(1.0, max(0, matches) / cfg.shaping_decay_matches)
+    return 1.0 - (1.0 - cfg.shaping_floor) * x
+
+
+def _status_ids(pred) -> frozenset:
+    return frozenset(k for k, v in STATUS_NAMES.items() if pred(v))
+
+
+_HITSTUN_STATUSES = _status_ids(lambda n: n == "DAMAGE" or (n.startswith("DAMAGE_") and not n.startswith(("DAMAGE_SONG", "DAMAGE_SLEEP"))))
+_CLIFF_STATUSES = _status_ids(lambda n: n.startswith("CLIFF_"))
+_DEAD_STATUSES = _status_ids(lambda n: n in ("DEAD", "REBIRTH"))
+_METEOR_STATUS = {v: k for k, v in STATUS_NAMES.items()}["DAMAGE_FLY_METEOR"]
+NEG_INF = -10 ** 9
+
+# term -> (reward total column, count column); also the keys of RewardTracker.totals.
+SHAPING_TERMS = {
+    "edgeguard": ("edgeguard_reward", "edgeguards"),
+    "spike": ("spike_reward", "spikes"),
+    "combo": ("combo_reward", "combo_hits"),
+    "recovery": ("recovery_reward", "recoveries"),
+    "last_jump": ("last_jump_reward", "last_jumps"),
+    "stage_control": ("stage_control_reward", "stage_control_steps"),
+}
+SHAPING_COLUMNS = [c for pair in SHAPING_TERMS.values() for c in pair]
+
+
+def hitstun(ft: Fighter) -> bool:
+    """In hitstun: the flag, or a DAMAGE_* status (the flag alone may lag)."""
+    return ft.in_hitstun or ft.status_kind in _HITSTUN_STATUSES
+
 
 class RewardTracker:
-    """Reward for a stream of frames. Feed every frame in order with `step`."""
+    """Reward for a stream of frames. Feed every frame in order with `step`,
+    and call `finish` once when the match ended for real.
 
-    def __init__(self, cfg: RewardConfig = RewardConfig()) -> None:
+    Base reward: see the module docstring. Shaping terms (bot perspective, each
+    with its own weight, per-match cap and counters in `totals`; every term
+    except stage control is multiplied by `shaping_mult`, which for stage
+    control is folded into Phi). Counts record detections even when the cap
+    stops the reward:
+
+    - edgeguard: the opponent loses a stock after >= edgeguard_min_frames of
+      *free* offstage time (offstage, not in hitstun, not hanging on the
+      ledge: i.e. it was recovering) and, within edgeguard_window frames
+      before the KO, the bot hit it while it was offstage (full bonus) or
+      stood onstage within edgeguard_near of the ledge (x edgeguard_guard_frac).
+    - spike: the opponent takes damage while offstage, is in hitstun, and
+      within spike_window frames vel_y <= -spike_vel, at least spike_delta
+      below its vel_y before the hit, and steeper than it is wide (or the
+      status is DAMAGE_FLY_METEOR with vel_y < 0). Once per hit.
+    - combo: the opponent takes damage while it was still in hitstun the frame
+      before, at least combo_min_gap frames after the previous hit, the bot not
+      being in hitstun itself (a trade is not a combo). Pays
+      combo_bonus * min(hits - 1, combo_max_len).
+    - recovery: after >= recovery_min_frames offstage (not on the ledge), the
+      bot is back inside the ledges or grabbed the ledge: recovery_bonus, at
+      most once per recovery_cooldown frames. The bot using its last jump
+      (jumps_left > 0 -> 0) offstage farther than last_jump_far from the ledge
+      costs last_jump_penalty. The self-destruct penalty stays in the base.
+    - stage control: Phi = w * (closeness(opp) - closeness(bot)), closeness
+      being 1 - (distance inside the ledge)/scale clipped to [0, 1] (so 1 at the
+      ledge or beyond). The reward is gamma * Phi(s') - Phi(s) per step, and
+      -Phi(last state) in `finish` (terminal potential 0): potential-based
+      shaping, which cannot change the optimal policy. `gamma` must be the RL
+      discount (RLPolicy passes cfg.gamma).
+    """
+
+    def __init__(self, cfg: RewardConfig = RewardConfig(), gamma: float = 0.99, shaping_mult: float = 1.0) -> None:
         self.cfg = cfg
+        self.gamma = gamma
+        self.mult = shaping_mult
         self.reset()
 
     def reset(self) -> None:
@@ -154,11 +271,58 @@ class RewardTracker:
         self.offstage_run = 0
         self.totals = dict(damage_dealt=0.0, damage_taken=0.0, stocks_taken=0, stocks_lost=0,
                            self_destructs=0, offstage_frames=0)
+        for rew, cnt in SHAPING_TERMS.values():
+            self.totals[rew] = 0.0
+            self.totals[cnt] = 0
+        self.phi = 0.0
+        self.opp_free_off = 0          # free (not in hitstun) offstage frames of the opponent's current excursion
+        self.last_off_hit = NEG_INF    # frame the bot last hit the opponent while it was offstage
+        self.last_guard = NEG_INF      # frame the bot last stood by the ledge, onstage, while the opponent was offstage
+        self.spike_until = NEG_INF
+        self.spike_vy0 = 0.0
+        self.combo_len = 0
+        self.last_hit = NEG_INF
+        self.bot_exc = 0               # frames of the bot's current offstage excursion
+        self.last_recovery = NEG_INF
 
+    # -- geometry -----------------------------------------------------------
     def offstage(self, f: Frame) -> bool:
         _, cx, gy, lx = _layout_of(f.stage_id)
         b = f.bot
         return abs(b.pos_x - cx) > lx or b.pos_y < gy - self.cfg.offstage_below
+
+    def _away(self, ft: Fighter, sid: int) -> bool:
+        """Offstage by position and not hanging on the ledge."""
+        if ft.status_kind in _CLIFF_STATUSES:
+            return False
+        _, cx, gy, lx = _layout_of(sid)
+        return abs(ft.pos_x - cx) > lx or ft.pos_y < gy - self.cfg.offstage_below
+
+    def _closeness(self, ft: Fighter, sid: int) -> float:
+        _, cx, _, lx = _layout_of(sid)
+        inside = max(0.0, lx - abs(ft.pos_x - cx))
+        return max(0.0, 1.0 - inside / self.cfg.stage_control_scale)
+
+    def potential(self, f: Frame) -> float:
+        """Phi(s), including the decay multiplier (constant within a match)."""
+        return self.cfg.stage_control_weight * self.mult * (
+            self._closeness(f.opponent, f.stage_id) - self._closeness(f.bot, f.stage_id))
+
+    # -- shaping bookkeeping --------------------------------------------------
+    def _add(self, term: str, amount: float, scaled: bool = True) -> float:
+        """Credit `amount` (times the decay multiplier) to a term, clamped so the
+        term's running total stays within +-cap. Returns what was applied."""
+        rew, _ = SHAPING_TERMS[term]
+        cap = getattr(self.cfg, term + "_cap")
+        if scaled:
+            amount *= self.mult
+        total = self.totals[rew]
+        new = min(cap, max(-cap, total + amount))
+        self.totals[rew] = new
+        return new - total
+
+    def _count(self, term: str) -> None:
+        self.totals[SHAPING_TERMS[term][1]] += 1
 
     def step(self, f: Frame) -> float:
         c, t = self.cfg, self.totals
@@ -167,6 +331,7 @@ class RewardTracker:
             if f.bot.stocks > 0 and f.opponent.stocks > 0:
                 self.armed = True
                 self.prev = f
+                self.phi = self.potential(f)
             return 0.0
         p = self.prev
         self.prev = f
@@ -177,11 +342,13 @@ class RewardTracker:
         t["damage_dealt"] += dealt
         t["damage_taken"] += taken
         self.since_damage = 0 if taken > 0 else self.since_damage + 1
-        if p.opponent.stocks > 0 and 0 <= f.opponent.stocks < p.opponent.stocks:
+        ko_opp = p.opponent.stocks > 0 and 0 <= f.opponent.stocks < p.opponent.stocks
+        ko_bot = p.bot.stocks > 0 and 0 <= f.bot.stocks < p.bot.stocks
+        if ko_opp:
             n = p.opponent.stocks - f.opponent.stocks
             r += c.stock_taken * n
             t["stocks_taken"] += n
-        if p.bot.stocks > 0 and 0 <= f.bot.stocks < p.bot.stocks:
+        if ko_bot:
             n = p.bot.stocks - f.bot.stocks
             r -= c.stock_lost * n
             t["stocks_lost"] += n
@@ -195,7 +362,102 @@ class RewardTracker:
                 t["offstage_frames"] += 1
         else:
             self.offstage_run = 0
+        return r + self._shaping(p, f, dealt, ko_opp, ko_bot)
+
+    def finish(self) -> float:
+        """Terminal potential shaping (Phi of the end state is 0): call once when
+        the match is really over. Returns the reward to add to the last frame."""
+        if not self.armed:
+            return 0.0
+        r = self._add("stage_control", -self.phi, scaled=False)
+        self.phi = 0.0
         return r
+
+    # -- shaping terms --------------------------------------------------------
+    def _shaping(self, p: Frame, f: Frame, dealt: float, ko_opp: bool, ko_bot: bool) -> float:
+        c, fr, sid = self.cfg, f.frame, f.stage_id
+        r = 0.0
+        opp, bot = f.opponent, f.bot
+
+        # 1, 2, 3: the opponent. A frame with a stock loss (position already the respawn's) only settles the KO.
+        if ko_opp:
+            if self.opp_free_off >= c.edgeguard_min_frames:
+                if fr - self.last_off_hit <= c.edgeguard_window:
+                    r += self._edgeguard(1.0)
+                elif fr - self.last_guard <= c.edgeguard_window:
+                    r += self._edgeguard(c.edgeguard_guard_frac)
+            self.opp_free_off, self.combo_len = 0, 0
+            self.spike_until = NEG_INF
+        elif opp.status_kind not in _DEAD_STATUSES:
+            off = self._away(opp, sid)
+            if off:
+                if not hitstun(opp):
+                    self.opp_free_off += 1
+                _, cx, _, lx = _layout_of(sid)
+                if not self._away(bot, sid) and bot.status_kind not in _DEAD_STATUSES and abs(bot.pos_x - cx) >= lx - c.edgeguard_near:
+                    self.last_guard = fr
+            else:
+                self.opp_free_off = 0
+            if dealt > 0:
+                if off:
+                    self.last_off_hit = fr
+                    self.spike_until = fr + c.spike_window
+                    self.spike_vy0 = p.opponent.vel_y
+                r += self._combo(p, f, fr)
+            elif not hitstun(opp):
+                self.combo_len = 0
+            if off and fr <= self.spike_until and hitstun(opp):
+                vy = opp.vel_y
+                steep = vy <= -c.spike_vel and vy <= self.spike_vy0 - c.spike_delta and -vy > abs(opp.vel_x)
+                if steep or (opp.status_kind == _METEOR_STATUS and vy < 0):
+                    self.spike_until = NEG_INF
+                    self._count("spike")
+                    r += self._add("spike", c.spike_bonus)
+
+        # 4: the bot
+        if ko_bot:
+            self.bot_exc = 0
+        elif bot.status_kind not in _DEAD_STATUSES:
+            if self._away(bot, sid):
+                self.bot_exc += 1
+                if p.bot.jumps_left > 0 and bot.jumps_left == 0:
+                    _, cx, gy, lx = _layout_of(sid)
+                    dist = math.hypot(max(0.0, abs(bot.pos_x - cx) - lx), min(0.0, bot.pos_y - gy))
+                    if dist > c.last_jump_far:
+                        self._count("last_jump")
+                        r += self._add("last_jump", -c.last_jump_penalty)
+            else:
+                if self.bot_exc >= c.recovery_min_frames and fr - self.last_recovery >= c.recovery_cooldown:
+                    self.last_recovery = fr
+                    self._count("recovery")
+                    r += self._add("recovery", c.recovery_bonus)
+                self.bot_exc = 0
+
+        # 5: potential-based stage control
+        phi = self.potential(f)
+        self._count("stage_control")
+        r += self._add("stage_control", self.gamma * phi - self.phi, scaled=False)
+        self.phi = phi
+        return r
+
+    def _edgeguard(self, frac: float) -> float:
+        self._count("edgeguard")
+        return self._add("edgeguard", self.cfg.edgeguard_bonus * frac)
+
+    def _combo(self, p: Frame, f: Frame, fr: int) -> float:
+        c = self.cfg
+        if hitstun(f.bot):                     # a trade: not the bot's combo
+            return 0.0
+        if self.combo_len > 0 and hitstun(p.opponent):
+            gap, self.last_hit = fr - self.last_hit, fr
+            if gap < c.combo_min_gap:
+                return 0.0                     # another hit of the same (multi-hit) move: a chain never counts
+            self.combo_len += 1
+            self._count("combo")
+            return self._add("combo", c.combo_bonus * min(self.combo_len - 1, c.combo_max_len))
+        self.combo_len = 1
+        self.last_hit = fr
+        return 0.0
 
 
 def delayed_rewards(decision_frames: Sequence[int], reward_frames: Sequence[int], rewards: Sequence[float],
@@ -530,7 +792,7 @@ class Learner:
 
 MATCH_COLUMNS = ["match", "time", "version", "updates_done", "frames", "decisions", "return", "result", "win",
                  "bot_stocks", "opp_stocks", "damage_dealt", "damage_taken", "stocks_taken", "stocks_lost",
-                 "self_destructs", "offstage_frames", "mean_entropy", "mean_value", "act_ms_mean",
+                 "self_destructs", "offstage_frames", "shaping_mult", *SHAPING_COLUMNS, "shaping_total", "mean_entropy", "mean_value", "act_ms_mean",
                  "rolling_win", "kept", "last_kl_ref", "last_update_entropy", "last_policy_loss", "last_value_loss"]
 
 
@@ -636,7 +898,7 @@ class RLPolicy:
 
     # -- per match ----------------------------------------------------------
     def _reset_match(self) -> None:
-        self.tracker = RewardTracker(self.rcfg)
+        self.tracker = RewardTracker(self.rcfg, self.cfg.gamma, shaping_multiplier(self.rcfg, self.matches))
         self.prev: deque[Inputs] = deque(maxlen=max(1, self.fcfg.prev_inputs))
         self.last_frame: int | None = None
         self.last_obj: Frame | None = None
@@ -730,6 +992,8 @@ class RLPolicy:
         if not done:
             res = f"incomplete:{reason}"
         win = 1.0 if res == "win" else 0.0
+        if done:
+            self._rew[-1] += self.tracker.finish()   # terminal potential: Phi(end) = 0
         t = self.tracker.totals
         if kept:
             self.matches += 1
@@ -743,7 +1007,9 @@ class RLPolicy:
             "return": float(shaped.sum()), "result": res, "win": win, "bot_stocks": bot_stocks, "opp_stocks": opp_stocks,
             "damage_dealt": round(t["damage_dealt"], 2), "damage_taken": round(t["damage_taken"], 2),
             "stocks_taken": t["stocks_taken"], "stocks_lost": t["stocks_lost"], "self_destructs": t["self_destructs"],
-            "offstage_frames": t["offstage_frames"], "mean_entropy": self._ent / n,
+            "offstage_frames": t["offstage_frames"], "shaping_mult": round(self.tracker.mult, 4),
+            **{k: (round(t[k], 4) if isinstance(t[k], float) else t[k]) for k in SHAPING_COLUMNS},
+            "shaping_total": round(sum(t[r] for r, _ in SHAPING_TERMS.values()), 4), "mean_entropy": self._ent / n,
             "mean_value": float(np.mean(self._val)), "act_ms_mean": 1e3 * self._t_act / n,
             "rolling_win": rolling, "kept": int(kept),
             "last_kl_ref": ls.get("kl_ref", ""), "last_update_entropy": ls.get("entropy", ""),

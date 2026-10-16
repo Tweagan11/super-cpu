@@ -193,19 +193,91 @@ the short version:
   stock taken (+5) and lost (-5), extra penalty for a probable self-destruct,
   small per-frame penalty for time offstage past a grace period. Nothing is
   counted until both fighters show stocks > 0 (hardware reads 0 at the start).
+  On top: five decaying shaping terms (edgeguard KO, spike, combo extension,
+  recovery, potential-based stage control), see "Reward terms" below.
 - Delay: the decision on frame t applies on t + delay, so its reward is the
   one seen on that later frame (`effect_lag` shifts it further). GAE runs
   over decisions with the match end as terminal.
 - KL(pi || pi_BC) penalty (`kl_coef`), entropy bonus (`ent_coef`), value head
   trained alone for the first 2 updates, PPO clipping and a target_kl stop.
 - Output: `data/rl/<run>/matches.csv` (return, win/loss, damage, stocks,
-  entropy), `updates.csv`, `config.json`. `checkpoints/rl/<run>/last.pt`
+  entropy, per-term shaping totals and the decay multiplier), `updates.csv`, `config.json`. `checkpoints/rl/<run>/last.pt`
   every `ckpt_every` matches and `best.pt` by rolling win rate. Both load with
   `--policy bc` (greedy play of the tuned weights).
 - Config: `SCPU_RL_<FIELD>` for every `RLConfig` field (lr, kl_coef,
   matches_per_update, learn_device, greedy, ...) and `SCPU_RL_REWARD_<FIELD>`
   for every `RewardConfig` field. `SCPU_RL_LEARN=0` or `SCPU_RL_GREEDY=1`
   plays without learning, for evaluating a checkpoint.
+
+### Reward terms
+
+Base reward (never decayed): damage dealt/taken (0.01 per %), stocks taken/lost
+(5.0), self-destruct (-2.0 extra), offstage penalty (0.002 per frame after a 90
+frame grace). On top of it come five shaping terms, each with its own weight
+(`SCPU_RL_REWARD_<FIELD>`), a per-match cap on its total, and a column in
+`matches.csv` (`<term>_reward` for the reward, plus a count: detections, counted
+even when the cap stopped the reward). Rewards are summed per frame and credited
+by applied frame exactly like the base reward (see Delay above). "Offstage"
+means past the stage's ledge horizontally or `offstage_below` under the ground;
+a fighter in a `CLIFF_*` status counts as on the ledge, not offstage. Hitstun is
+the `in_hitstun` flag or a `DAMAGE_*` status. Units are the stream's (positions
+in stage units, velocity per frame); the velocity thresholds are first guesses,
+check them against logged hits.
+
+| Term | Detects | Default weight (cap) |
+| --- | --- | --- |
+| edgeguard | Opponent loses a stock after at least `edgeguard_min_frames` (30) of free offstage time (offstage, not in hitstun, not on the ledge, so it was recovering). Full bonus if the bot hit it while it was offstage within `edgeguard_window` (180) frames of the KO. A fraction (`edgeguard_guard_frac` 0.5) if the bot only stood onstage within `edgeguard_near` (40) of the ledge in that window. Not paid for launches (hitstun the whole way), for dying onstage or out the top, or when the bot was nowhere near. | `edgeguard_bonus` 2.0 (6.0) |
+| spike | Opponent takes damage while offstage, is in hitstun, and within `spike_window` (3) frames has vel_y <= -`spike_vel` (2.5), at least `spike_delta` (1.0) lower than just before the hit, and steeper than it is wide (or status `DAMAGE_FLY_METEOR` with vel_y < 0). Once per hit. A downward hit onstage, an upward or weak hit, or an opponent already falling that fast does not count. | `spike_bonus` 1.5 (4.5) |
+| combo | Damage on the opponent while it was still in hitstun the frame before, at least `combo_min_gap` (4) frames after the previous hit, with the bot not in hitstun itself. Pays `combo_bonus` x (hits so far - 1), at most `combo_max_len` (5) times. | `combo_bonus` 0.1 (3.0) |
+| recovery | Bot was offstage (off the ledge) for at least `recovery_min_frames` (30) and is now back inside the ledges or hanging on the ledge. At most once per `recovery_cooldown` (180) frames. Dying first pays nothing. | `recovery_bonus` 0.5 (2.0) |
+| last_jump | Penalty: `jumps_left` goes from above 0 to 0 while the bot is offstage and more than `last_jump_far` (40) from the ledge. | `last_jump_penalty` 0.3 (1.0) |
+| stage_control | Potential-based: Phi = w x (closeness(opp) - closeness(bot)), closeness = 1 - (distance inside the ledge) / `stage_control_scale` (60), clipped to [0, 1], so 1 at or beyond the ledge. Reward per frame is gamma x Phi(s') - Phi(s), and -Phi(last) at a real match end (terminal potential 0). Positions only, so by Ng et al. (1999) it cannot change the optimal policy. | `stage_control_weight` 0.05 (2.0) |
+
+The `stage_control` cap is only a safety net: it is set wide so it never binds,
+since clipping a potential term breaks the guarantee. The tracker's `gamma`
+must be the RL discount; `RLPolicy` passes `gamma` from `RLConfig`, so keep them
+together if you change it.
+
+**Decay.** Terms 1-5 are multiplied (stage control through Phi) by a match-level
+factor that falls linearly from 1 to `shaping_floor` (0.2) over
+`shaping_decay_matches` (200) kept matches, then stays there. `0` turns the decay
+off. The factor used is the `shaping_mult` column. It is fixed within a match
+and follows the match count, so it continues across a resume. The base reward
+is never scaled, so late in training the bot is mostly optimizing winning.
+
+**Caps and why.** Each term's total is clamped to its cap per match (after the
+decay multiplier). A cap means a policy that finds a way to farm one term gets a
+bounded payout, so it cannot out-earn actually winning (a stock is worth 5.0).
+Caps count after decay, so they shrink with the multiplier only through the
+rewards, not by themselves.
+
+**Tuning.** Look at the per-term columns in `matches.csv` next to `win`. Healthy:
+`shaping_total` is a small fraction of `return` and wins go up with it. If a
+term's total sits at its cap in most matches, either lower its weight or the
+bot found a loop (below). To switch a term off set its weight to 0
+(`SCPU_RL_REWARD_SPIKE_BONUS=0`); set all five and the run is the base reward.
+
+**What reward hacking looks like**
+
+- edgeguard: the bot keeps the opponent offstage-ish without killing, or stands
+  at the ledge waiting. The count rises while `stocks_taken` does not; the
+  half-pay for just standing near the ledge is the weak spot, lower
+  `edgeguard_guard_frac` if so. Also, hits from a stage hazard are credited to the bot.
+- spike: pays on the opponent's hit, not on a KO. A bot that chases weak downward
+  hits at the ledge (`spikes` high, low `damage_dealt` and no KOs) is farming it.
+  Raise `spike_vel` / `spike_delta`, or lower the weight. Fast-falling and
+  character-specific knockback make this the term to verify on real logs.
+- combo: spamming multi-hit or rapid moves into a stunned opponent (`combo_hits`
+  in the tens, little damage). The gap, the length multiplier cap and the total
+  cap limit it; the cap should bind before a real 1-stock win does.
+- recovery: dropping off the ledge on purpose and grabbing it again (`recoveries`
+  up, `offstage_frames` up, stocks lost up). The minimum excursion, the cooldown
+  and the cap limit it. `last_jump_penalty` can also make the bot hold its jump
+  and die with it unused: if `stocks_lost` rises while `last_jumps` falls, lower it.
+- stage_control: cannot change the optimal policy by construction, but it does
+  speed up or distort learning when the weight is large relative to the base.
+  Standing at center and not fighting shows as a rising `stage_control_reward`
+  with low `damage_dealt`; lower the weight.
 
 ## Tests
 
