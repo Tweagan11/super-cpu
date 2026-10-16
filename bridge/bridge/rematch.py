@@ -3,7 +3,9 @@
 Driven by the scene packets (wire.SceneInfo) and the match boundary events
 from matches.MatchWatcher. After a match ends:
 
-- on the results screen, press A until the scene changes
+- after the match ends, press A steadily (every RESULTS_EVERY_S) until the
+  game reaches the stage select: the victory screen is still the match scene
+  (MeleeScene), then UnlockSequenceScene, and several screens in each need A
 - on the stage select, press A (picks the stage the cursor is on: last time's)
 - on the CSS, press + (start the match; the picks are kept from last time)
 
@@ -26,7 +28,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import menu_buttons as MB
-from .scenes import CSS, DEFAULT_NAMES, OTHER, RESULTS, STAGE, SceneNames
+from .scenes import CSS, DEFAULT_NAMES, MATCH, OTHER, RESULTS, STAGE, SceneNames
 
 SETTLE_S = 1.0       # after entering a scene, wait this long before the first press
 BACKOFF = 1.6        # each retry waits this much longer than the last
@@ -34,9 +36,14 @@ MAX_WAIT_S = 6.0     # ...but never more than this
 MAX_PRESSES = 12     # per scene visit, then give up until the scene changes
 STALE_AFTER_S = 3.5  # scene packets come every 1 s; older than this means we don't know
 PRESS_HOLD_FRAMES = 1  # one pulse. More frames means more pulses (1 on, 2 off).
+# After the match: victory screen (still the match scene) and results. A at a
+# steady pace, no backoff: each press moves one screen along.
+RESULTS_EVERY_S = 1.0
+RESULTS_MAX_PRESSES = 45
+STEADY = (MATCH, RESULTS)
 
 # which button each scene wants
-PRESS_FOR = {RESULTS: MB.A, STAGE: MB.A, CSS: MB.PLUS}
+PRESS_FOR = {MATCH: MB.A, RESULTS: MB.A, STAGE: MB.A, CSS: MB.PLUS}
 
 
 @dataclass
@@ -78,6 +85,13 @@ class Rematch:
     def on_match_end(self, ev) -> None:
         self.in_match = False
         self.armed = True
+        # The scene is still the match (victory screen): start pressing from now.
+        if self.visit is not None:
+            now = getattr(ev, "now", None)
+            if now is not None:
+                self.visit.next_at = now + self.settle
+            self.visit.presses = 0
+            self.visit.gave_up = False
         self.log("[rematch] match ended, will press through results and the CSS")
 
     def on_scene(self, scene, now: float) -> None:
@@ -106,16 +120,18 @@ class Rematch:
             return False
         if now < v.next_at:
             return False
-        if v.presses >= self.max_presses:
+        steady = v.kind in STEADY
+        cap = max(self.max_presses, RESULTS_MAX_PRESSES) if steady else self.max_presses
+        if v.presses >= cap:
             v.gave_up = True
             self.log(f"[rematch] giving up on {v.name!r}: {v.presses} presses and the scene didn't change. "
                      f"Press by hand to continue.")
             return False
         v.presses += 1
         self.presses_total += 1
-        wait = min(MAX_WAIT_S, self.settle * BACKOFF ** v.presses)
+        wait = RESULTS_EVERY_S if steady else min(MAX_WAIT_S, self.settle * BACKOFF ** v.presses)
         v.next_at = now + wait
-        self.log(f"[rematch] {'A' if button == MB.A else '+'} on {v.name!r}, press {v.presses}/{self.max_presses}, "
+        self.log(f"[rematch] {'A' if button == MB.A else '+'} on {v.name!r}, press {v.presses}/{cap}, "
                  f"next in {wait:.1f}s")
         self.press(button, PRESS_HOLD_FRAMES)
         return True

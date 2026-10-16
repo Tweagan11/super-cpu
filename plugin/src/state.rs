@@ -92,6 +92,16 @@ static SENDER: OnceLock<SyncSender<FrameState>> = OnceLock::new();
 /// Frames handed to the network thread, reported in the heartbeat.
 pub static FRAMES_QUEUED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static FIGHTER_MANAGER: AtomicUsize = AtomicUsize::new(0);
+/// The last gameplay frame had a fighter out of stocks: the match is over and
+/// what follows in the match scene is the victory screen. (Stocks read 0 for
+/// the first frames of a match too, but fighter frames are live then.)
+static LAST_ZERO_STOCKS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True after a stock match ended (someone at 0 stocks) and no fighter frame
+/// ran for 250 ms: the victory/results screen, still in the match scene.
+pub fn match_over() -> bool {
+    LAST_ZERO_STOCKS.load(Ordering::Relaxed) && live_frame().is_none()
+}
 
 /// A gap this long with no fighter frames means the next frame is a new match.
 const NEW_MATCH_GAP: Duration = Duration::from_secs(1);
@@ -182,6 +192,7 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
         c.last_seen = Some(now);
         c.last_entry = entry;
         c.current.fighters[entry as usize] = fighter;
+        LAST_ZERO_STOCKS.store(c.current.fighters.iter().any(|f| f.stocks == 0), Ordering::Relaxed);
         c.current.cm_inputs[entry as usize] = cm;
         c.current.cm_valid |= if entry == 0 { CAP_P1_CM } else { CAP_P2_CM };
         if crate::input::drive_cpu() && entry as u8 + 1 == crate::input::bot_port() {

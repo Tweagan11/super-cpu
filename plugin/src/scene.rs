@@ -87,10 +87,12 @@ pub fn is_match_scene(name: &str) -> bool {
     MATCH_SCENE_HINTS.iter().any(|h| lower.contains(h)) && !NOT_MATCH_HINTS.iter().any(|h| lower.contains(h))
 }
 
-/// Menu presses are allowed once a scene is known and it isn't the match.
+/// Menu presses are allowed once a scene is known and it isn't the match,
+/// or it is the match scene but the match is over: the victory screen shows
+/// in the match scene, before UnlockSequenceScene (seen on hardware).
 pub fn menu_presses_allowed() -> bool {
     let s = snapshot();
-    s.len > 0 && !is_match_scene(&s.name())
+    s.len > 0 && (!is_match_scene(&s.name()) || crate::state::match_over())
 }
 
 pub fn scene_packet(seq: u32, s: &Scene, flags: u32, menu_applied: u32, menu_last_seq: u32) -> [u8; SCENE_LEN] {

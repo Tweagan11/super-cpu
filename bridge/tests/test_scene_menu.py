@@ -150,13 +150,31 @@ class RematchTests(unittest.TestCase):
         self.run_until(14.0, 5)
         self.assertEqual(len(self.pressed), n)
 
+    def test_victory_and_results_get_steady_a(self):
+        """After the match: A every second, first on the match scene (the
+        victory screen) and then on the results scene, with no backoff."""
+        from bridge.rematch import RESULTS_EVERY_S
+        self.scene("MeleeScene", 1, 0.0)
+        self.r.on_match_start(None)
+        self.r.on_match_end(None)
+        times = []
+        t = 0.0
+        while t < 10.0:
+            self.scene("MeleeScene" if t < 5 else "UnlockSequenceScene", 1 if t < 5 else 2, t)
+            if self.r.tick(t):
+                times.append(t)
+            t += 0.1
+        gaps = [b - a for a, b in zip(times, times[1:])]
+        self.assertGreaterEqual(len(times), 7)
+        self.assertTrue(all(abs(g - RESULTS_EVERY_S) < 0.15 for g in gaps if g < 1.5), gaps)
+
     def test_backoff_grows_and_gives_up(self):
         self.r.on_match_end(None)
-        self.scene("ResultScene", 1, 0.0)
+        self.scene("CharaSelectScene", 1, 0.0)
         times = []
         t = 0.0
         while t < 120.0:
-            self.scene("ResultScene", 1, t)  # the 1 s scene packets keep arriving
+            self.scene("CharaSelectScene", 1, t)  # the 1 s scene packets keep arriving
             if self.r.tick(t):
                 times.append(t)
             t += 0.1
