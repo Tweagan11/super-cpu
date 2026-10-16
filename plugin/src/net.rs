@@ -3,12 +3,13 @@
 //!
 //! Runs on its own thread. The game thread hands it finished frames (and
 //! input acks) through bounded channels and never waits on the network.
-//! Input packets (kind 2) come back on a clone of the same socket, read by
-//! a receive thread, and go to `input.rs`. Log lines go out as kind 6.
+//! Input packets (kind 2) come back on the same socket (shared with a receive
+//! thread), and go to `input.rs`. Log lines go out as kind 6.
 
 use std::io::ErrorKind;
 use std::net::{IpAddr, UdpSocket};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -134,21 +135,18 @@ static LIVE_FRAME: AtomicU32 = AtomicU32::new(0);
 /// Bumped on every rebind so an old receive thread knows to quit.
 static SOCKET_GEN: AtomicU32 = AtomicU32::new(0);
 
-/// Receives input packets on their own thread, on a clone of the send socket
-/// (so the PC can just reply to where state came from). A plain blocking
-/// receive: it can wait as long as it likes without ever holding up state.
-/// The read timeout is only there so the thread notices a rebind and quits;
-/// if the platform ignores it, an old thread just sits on a dead socket.
-fn spawn_receiver(sock: &UdpSocket, pc_ip: Option<IpAddr>) -> bool {
-    let s = match sock.try_clone() {
-        Ok(s) => s,
-        Err(e) => {
-            log::log(format!("inputs off: couldn't clone the UDP socket for receiving: {e}"));
-            return false;
-        }
-    };
-    let _ = s.set_nonblocking(false);
-    let timeout_ok = s.set_read_timeout(Some(RECV_TIMEOUT)).is_ok();
+/// Receives input packets on their own thread, on the same socket the send
+/// loop uses (shared through an Arc), so the PC can just reply to where state
+/// came from. The Switch can't duplicate sockets (`try_clone` fails with
+/// os error 1), but one thread blocking in recv while another sends on the
+/// same socket is fine. The read timeout bounds how long a receive waits, so
+/// the thread notices a rebind, and so a socket layer that serializes calls
+/// could only ever delay a send by that much. The send loop watches for that.
+fn spawn_receiver(s: Arc<UdpSocket>, pc_ip: Option<IpAddr>) -> bool {
+    if let Err(e) = s.set_read_timeout(Some(RECV_TIMEOUT)) {
+        log::log(format!("inputs off: couldn't set a read timeout on the socket: {e}"));
+        return false;
+    }
     let gen = SOCKET_GEN.load(Ordering::Relaxed);
     let spawned = std::thread::Builder::new().name("super-cpu-rx".into()).spawn(move || {
         let mut rx = InputReceiver::new();
@@ -189,10 +187,7 @@ fn spawn_receiver(sock: &UdpSocket, pc_ip: Option<IpAddr>) -> bool {
     });
     match spawned {
         Ok(_) => {
-            log::log(format!(
-                "inputs on: receiving on a socket clone (read timeout {})",
-                if timeout_ok { "set" } else { "not supported, fine" }
-            ));
+            log::log("inputs on: receive thread started");
             true
         }
         Err(e) => {
@@ -202,7 +197,10 @@ fn spawn_receiver(sock: &UdpSocket, pc_ip: Option<IpAddr>) -> bool {
     }
 }
 
-const RECV_TIMEOUT: Duration = Duration::from_millis(250);
+const RECV_TIMEOUT: Duration = Duration::from_millis(20);
+/// A send slower than this while receiving is logged once: it would mean the
+/// socket layer makes sends wait for the blocked receive.
+const SLOW_SEND: Duration = Duration::from_millis(4);
 const LOG_RESEND_EVERY: Duration = Duration::from_secs(5);
 
 /// Runs forever on its own thread: forwards each finished frame as a state
@@ -224,13 +222,15 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
                 continue;
             }
         };
+        let sock = Arc::new(sock);
         SOCKET_GEN.fetch_add(1, Ordering::Relaxed);
-        let receiving = spawn_receiver(&sock, pc_ip);
+        let receiving = spawn_receiver(Arc::clone(&sock), pc_ip);
         input::RECEIVING.store(receiving, Ordering::Relaxed);
         log::log(format!("streaming to {target}"));
         let mut next_heartbeat = Instant::now();
         let mut next_log_resend = Instant::now();
         let mut logs_sent = 0u32;
+        let mut warned_slow = false;
         'conn: loop {
             while let Ok(a) = acks.try_recv() {
                 if !send(&sock, &ack_packet(seq, &a), &target) {
@@ -242,8 +242,16 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
             match frames.recv_timeout(wait) {
                 Ok(frame) => {
                     LIVE_FRAME.store(frame.frame, Ordering::Relaxed);
+                    let t = Instant::now();
                     if !send(&sock, &state_packet(seq, &frame), &target) {
                         break;
+                    }
+                    let took = t.elapsed();
+                    if receiving && took > SLOW_SEND && !warned_slow {
+                        warned_slow = true;
+                        log::log(format!(
+                            "state send took {took:?} while receiving: sends may be waiting on the receive"
+                        ));
                     }
                     seq = seq.wrapping_add(1);
                 }
@@ -288,6 +296,30 @@ const ACK_POLL: Duration = Duration::from_millis(1);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The receive thread reads packets on the shared socket while this
+    /// thread keeps sending on it, and sends stay fast.
+    #[test]
+    fn shared_socket_receives_while_sending() {
+        let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap());
+        let addr = sock.local_addr().unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        SOCKET_GEN.fetch_add(1, Ordering::Relaxed);
+        assert!(spawn_receiver(Arc::clone(&sock), None));
+        let before = input::SHARED.rejected.load(Ordering::Relaxed);
+        let mut slowest = Duration::ZERO;
+        for _ in 0..20 {
+            peer.send_to(b"not an input packet", addr).unwrap();
+            let t = Instant::now();
+            sock.send_to(b"state", peer.local_addr().unwrap()).unwrap();
+            slowest = slowest.max(t.elapsed());
+            sleep(Duration::from_millis(2));
+        }
+        sleep(Duration::from_millis(50));
+        SOCKET_GEN.fetch_add(1, Ordering::Relaxed); // let the thread quit
+        assert!(input::SHARED.rejected.load(Ordering::Relaxed) - before >= 20);
+        assert!(slowest < SLOW_SEND, "send took {slowest:?}");
+    }
 
     fn hex(b: &[u8]) -> String {
         b.iter().map(|x| format!("{x:02x}")).collect()
