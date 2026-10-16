@@ -5,6 +5,7 @@
 | SSB-14 Feature pipeline | `features.py` | done, live/logged parity tested |
 | SSB-15 Action space | `actions.py` | done: 17 stick x 5 c-stick x 9 button combos |
 | SSB-16 Behavior cloning | `train_bc.py`, `bc_policy.py` | done, verified on synthetic data only |
+| SSB-26 Inverse dynamics (IDM) | `idm.py` | done, verified on synthetic data only |
 | SSB-18 DAgger | `dagger.py` | not started |
 | SSB-21 RL fine-tune | `rl.py` | not started |
 
@@ -36,6 +37,7 @@ the right `--index-url`), then the line above.
 | `actions.py` | action classes, encode/decode, `python -m training.actions <files>` round trip report |
 | `train_bc.py` | the trainer, model (`BCNet`) and checkpoint load/save |
 | `bc_policy.py` | `BCPolicy`, registered as `--policy bc` in `bridge/bridge/policy.py` |
+| `idm.py` | inverse dynamics model: `train`, `eval`, `label` (reuses `BCNet`, `window_features`) |
 | `synthetic.py` | fake logged matches with known labels, for tests before real data exists |
 | `smoke_test.py` | the whole pipeline end to end on synthetic data |
 | `tests/` | unit tests |
@@ -106,6 +108,51 @@ python -m training.train_bc data/matches --model gru     # optional GRU variant
   majority-class baseline are printed each epoch.
 - Checkpoints go to `checkpoints/<timestamp>-<model>-s<seed>/{best,last}.pt`
   plus `summary.json`. `checkpoints/` and `data/` are git-ignored.
+
+## Inverse dynamics model (SSB-26)
+
+A BC policy sees state up to frame t and guesses the input. An IDM sees state
+around t, past and future (default `t-7 .. t+8`), and says which input was
+pressed on t. That is much easier, so it can label matches that have no inputs:
+a Smash replay streamed through the plugin, or a port with `input_valid = 0`.
+The labeled rows then become BC data, which is the cheap way to get a lot more
+of it than we can play.
+
+```
+python -m training.idm train data/matches --device cuda --out checkpoints/idm1
+python -m training.idm eval  checkpoints/idm1/best.pt data/matches            # the checkpoint's held-out matches
+python -m training.idm label checkpoints/idm1/best.pt data/replays --port 2   # writes <stem>.inferred.npz
+python -m training.train_bc data/matches data/replays --include-inferred --bot-port 2
+```
+
+- Same features (`features.window_features`), same action classes, same
+  `BCNet`. A sample is (row, port): perspective is that port, and both ports
+  with recorded inputs are used. No past-input features. Needs frame t+8 in the
+  log, so the last frames and rows next to a dropped packet at t+8 stay unlabeled.
+- `eval` prints per-head accuracy next to the majority baseline, exact action
+  accuracy, top confusions per head and button classes by recall (HARD < 50%).
+  Always judge against the baseline: the c-stick is centered most of the time.
+- `label` never edits its input. The new file has the same frames and an
+  `inferred` bool array (n, 2). On those rows the input columns hold the
+  prediction but `input_valid` stays 0, so tools that don't know about IDMs
+  still treat them as unknown. Header: `derived_from` (raw match id) and
+  `inferred_inputs: {"<port>": {"model", "rows", "unlabeled_rows", "mean_conf", ...}}`.
+  `--min-conf` leaves low-confidence rows unlabeled.
+- `build_dataset` and `train_bc` ignore inferred rows unless
+  `--include-inferred` / `include_inferred=True`. If a raw log and its labeled
+  copy are both given, only one is used (the copy only with the flag), so a
+  directory holding both is not double counted. The IDM itself never trains
+  on inferred rows.
+- Not checked on real data yet. Run `eval` on held-out human matches first;
+  label noise is what BC inherits, and the hard classes it prints (likely
+  short hop vs jump, half vs full tilt) are the ones to distrust.
+
+Plan for replays: (1) hardware question, does the plugin stream state while a
+replay plays back? (`docs/testing-phase0.md` section 12). (2) If yes, stream
+replays with `udp_listen --log` (no inputs, `input_valid = 0` on both
+ports). (3) Train the IDM on matches with captured inputs, `label` the replays
+for both ports, train BC with `--include-inferred`. (4) Compare the 50-game
+eval against the recorded-only model before trusting it.
 
 ## Running it as the bot
 

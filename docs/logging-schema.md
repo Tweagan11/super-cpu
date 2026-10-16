@@ -106,6 +106,10 @@ So with a v4 plugin both ports are filled almost every frame, human, bot or CPU,
 
 Rows are only frames that arrived. Dropped packets leave gaps in `frame`; nothing is interpolated.
 
+## Labeled copies (SSB-26)
+
+`python -m training.idm label` writes `<stem>.inferred.npz` next to a log, never over it. It adds a bool array `inferred` `(n, 2)` to the npz (`LoadedMatch.inferred`, None for ordinary logs) and header keys `derived_from` and `inferred_inputs` (per port: `model`, `rows`, `unlabeled_rows`, `future`, `window`, `min_conf`, `mean_conf`). On marked rows the input columns are predictions and `input_valid` stays 0. Training ignores them unless asked (`--include-inferred`).
+
 ## Rules
 
 - A match whose heartbeat `game_version` isn't the expected one (`--expect-version`, default 13.0.4), or that changed mid-match, or that had no heartbeat at all, is not written. The logger prints why.

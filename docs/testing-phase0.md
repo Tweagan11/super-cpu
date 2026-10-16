@@ -305,6 +305,14 @@ python -m bridge.run --policy scripted --log --eval 3 --model scripted --auto-re
 
 Start the first match by hand and walk away. Expect 3 `[log] wrote` lines and 3 `[eval] game` lines, with only a handful of `[rematch]` lines per screen. Anything stuck for over a minute is a wrong scene name or an unpressed screen: look at the last `[run] scene:` line.
 
+## 12. Replays (SSB-26, optional)
+
+Question for the IDM plan (`training/README.md`): does the plugin send state while a Smash replay plays back?
+
+1. `python -m bridge.udp_listen --log` on the PC, game running with the plugin.
+2. Open a saved replay from the game's replay menu and let it play for a few seconds.
+3. Look for fighter lines (and a `match started` line) in the listener. Expect no `in ...` input on them. Note whether they appear, whether the frame numbers climb, and whether a `.npz` gets written at the end. Send me the answer either way.
+
 ## If nothing shows up
 
 | Symptom | Likely cause |
