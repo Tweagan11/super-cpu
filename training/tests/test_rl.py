@@ -30,6 +30,10 @@ def fighter(**kw) -> Fighter:
     return Fighter(**base)
 
 
+NO_SHAPING = dict(edgeguard_bonus=0.0, spike_bonus=0.0, combo_bonus=0.0, recovery_bonus=0.0,
+                  last_jump_penalty=0.0, stage_control_weight=0.0)
+
+
 def fr(n, bot=None, opp=None, stage=0):
     return Frame(n, stage, bot or fighter(), opp or fighter(pos_x=50.0, facing=-1))
 
@@ -38,7 +42,7 @@ def fr(n, bot=None, opp=None, stage=0):
 class RewardTests(unittest.TestCase):
     def tracker(self, **kw):
         from training.rl import RewardConfig, RewardTracker
-        return RewardTracker(RewardConfig(**kw))
+        return RewardTracker(RewardConfig(**{**NO_SHAPING, **kw}))
 
     def test_damage_and_stocks(self):
         t = self.tracker(offstage_penalty=0)
@@ -76,6 +80,291 @@ class RewardTests(unittest.TestCase):
         out = [t.step(f) for f in [fr(0)] + [fr(i, bot=off) for i in range(1, 7)] + [fr(7), fr(8, bot=off)]]
         self.assertEqual([round(x, 3) for x in out], [0, 0, 0, 0, -0.1, -0.1, -0.1, 0, 0])
         self.assertEqual(t.totals["offstage_frames"], 3)
+
+
+HIT = 2        # Fighter.flags: in hitstun
+AIR_HIT = 3    # airborne + in hitstun
+
+
+def run(tracker, frames):
+    return [tracker.step(f) for f in frames]
+
+
+def renumber(frames, start=0):
+    return [Frame(start + i, f.stage_id, f.bot, f.opponent) for i, f in enumerate(frames)]
+
+
+@SKIP
+class ShapingTests(unittest.TestCase):
+    """Synthetic sequences on the Final Destination layout (stage 0 is unknown -> FD: center 0, ledge 79.9, ground 0)."""
+
+    def only(self, term_weight: dict, **kw):
+        """A tracker with the base reward off and just the named shaping term(s) on."""
+        from training.rl import RewardConfig, RewardTracker
+        base = dict(NO_SHAPING, damage_dealt=0.0, damage_taken=0.0, stock_taken=0.0, stock_lost=0.0,
+                    self_destruct=0.0, offstage_penalty=0.0)
+        gamma = kw.pop("gamma", 0.99)
+        mult = kw.pop("mult", 1.0)
+        return RewardTracker(RewardConfig(**{**base, **term_weight, **kw}), gamma=gamma, shaping_mult=mult)
+
+    # -- 1. edgeguard ---------------------------------------------------------
+    def edgeguard_seq(self, free=40, hit=True, bot_x=60.0, hitstun_whole_time=False, opp_x=100.0, opp_y=-5.0):
+        """Opponent recovers offstage for `free` frames, (maybe) gets hit, then loses a stock."""
+        opp_flags = AIR_HIT if hitstun_whole_time else 1
+        frames = [fr(0), fr(1)]
+        for _ in range(free):
+            frames.append(fr(len(frames), bot=fighter(pos_x=bot_x), opp=fighter(pos_x=opp_x, pos_y=opp_y, flags=opp_flags)))
+        if hit:
+            frames.append(fr(len(frames), bot=fighter(pos_x=bot_x), opp=fighter(pos_x=opp_x, pos_y=opp_y, damage=20.0, flags=AIR_HIT)))
+        dmg = 20.0 if hit else 0.0
+        frames.append(fr(len(frames), bot=fighter(pos_x=bot_x), opp=fighter(pos_x=opp_x, pos_y=opp_y, damage=dmg, flags=AIR_HIT if hit else 1)))
+        frames.append(fr(len(frames), bot=fighter(pos_x=bot_x), opp=fighter(stocks=2)))   # KO: respawned, damage reset
+        return frames
+
+    def test_edgeguard_ko_full_bonus_when_the_bot_hit_them_offstage(self):
+        t = self.only(dict(edgeguard_bonus=2.0))
+        out = run(t, self.edgeguard_seq())
+        self.assertAlmostEqual(out[-1], 2.0)
+        self.assertAlmostEqual(t.totals["edgeguard_reward"], 2.0)
+        self.assertEqual(t.totals["edgeguards"], 1)
+
+    def test_edgeguard_ledge_guarding_only_pays_half(self):
+        t = self.only(dict(edgeguard_bonus=2.0))
+        out = run(t, self.edgeguard_seq(hit=False, bot_x=60.0))      # onstage, 20 from the ledge
+        self.assertAlmostEqual(out[-1], 1.0)
+
+    def test_edgeguard_near_misses(self):
+        def total(**kw):
+            t = self.only(dict(edgeguard_bonus=2.0))
+            run(t, self.edgeguard_seq(**kw))
+            return t.totals["edgeguard_reward"]
+        self.assertEqual(total(free=10), 0.0)                            # barely offstage before dying
+        self.assertEqual(total(hit=False, bot_x=0.0), 0.0)               # recovering, died alone, bot far from the ledge
+        self.assertEqual(total(opp_x=0.0, opp_y=0.0, bot_x=0.0), 0.0)    # never offstage (a plain KO, e.g. out the top)
+
+    def test_edgeguard_needs_a_recovery_not_just_a_launch(self):
+        t = self.only(dict(edgeguard_bonus=2.0))
+        run(t, self.edgeguard_seq(hitstun_whole_time=True, hit=True, bot_x=60.0))   # in hitstun all the way out
+        self.assertEqual(t.totals["edgeguards"], 0)
+
+    def test_ledge_hanging_resets_the_recovery_clock(self):
+        from training.rl import _CLIFF_STATUSES
+        cliff = sorted(_CLIFF_STATUSES)[0]
+        seq = self.edgeguard_seq(free=20)
+        hang = [fr(0, bot=fighter(pos_x=60.0), opp=fighter(pos_x=82.0, pos_y=-3.0, status_kind=cliff)) for _ in range(5)]
+        t = self.only(dict(edgeguard_bonus=2.0), edgeguard_min_frames=30)
+        run(t, renumber(seq[:12] + hang + seq[12:]))      # 10 free frames, a hang, then 10 + the hit and the KO
+        self.assertEqual(t.totals["edgeguards"], 0)
+        t = self.only(dict(edgeguard_bonus=2.0), edgeguard_min_frames=30)
+        run(t, renumber(self.edgeguard_seq(free=20)))     # same without the hang but too short: still nothing
+        self.assertEqual(t.totals["edgeguards"], 0)
+
+    # -- 2. spike ---------------------------------------------------------------
+    def spike_seq(self, opp_x=100.0, opp_y=-5.0, vy_before=-1.0, vy_after=-4.0, vx_after=0.5, flags=AIR_HIT, extra=0):
+        seq = [fr(0), fr(1)]
+        seq += [fr(2 + i, opp=fighter(pos_x=opp_x, pos_y=opp_y, vel_y=vy_before, flags=1)) for i in range(3)]
+        seq.append(fr(5, opp=fighter(pos_x=opp_x, pos_y=opp_y, vel_x=vx_after, vel_y=vy_after, damage=15.0, flags=flags)))
+        for i in range(extra):
+            seq.append(fr(6 + i, opp=fighter(pos_x=opp_x, pos_y=opp_y - 3 * i, vel_x=vx_after, vel_y=vy_after, damage=15.0, flags=flags)))
+        return seq
+
+    def spike_total(self, **kw):
+        t = self.only(dict(spike_bonus=1.5))
+        run(t, self.spike_seq(**kw))
+        return t.totals["spike_reward"], t.totals["spikes"]
+
+    def test_spike_fires_once_per_hit(self):
+        self.assertEqual(self.spike_total(), (1.5, 1))
+        self.assertEqual(self.spike_total(extra=4), (1.5, 1))      # still falling fast afterwards: no second payout
+
+    def test_downward_hit_onstage_is_not_a_spike(self):
+        self.assertEqual(self.spike_total(opp_x=0.0, opp_y=30.0), (0.0, 0))
+        self.assertEqual(self.spike_total(opp_x=40.0, opp_y=0.0), (0.0, 0))
+
+    def test_spike_near_misses_offstage(self):
+        self.assertEqual(self.spike_total(vy_after=+3.0), (0.0, 0))                  # launched up
+        self.assertEqual(self.spike_total(vy_after=-1.8), (0.0, 0))                  # weak, barely downward
+        self.assertEqual(self.spike_total(vy_before=-4.0, vy_after=-4.0), (0.0, 0))  # was already falling that fast
+        self.assertEqual(self.spike_total(vy_after=-3.0, vx_after=5.0), (0.0, 0))    # mostly sideways
+        self.assertEqual(self.spike_total(flags=1), (0.0, 0))                        # not in hitstun
+
+    def test_spike_velocity_may_show_up_a_frame_late(self):
+        t = self.only(dict(spike_bonus=1.5))
+        seq = self.spike_seq(vy_after=-1.0)                                           # the hit frame still shows old velocity
+        seq.append(fr(6, opp=fighter(pos_x=100.0, pos_y=-6.0, vel_x=0.5, vel_y=-4.5, damage=15.0, flags=AIR_HIT)))
+        run(t, seq)
+        self.assertEqual(t.totals["spikes"], 1)
+
+    # -- 3. combo ---------------------------------------------------------------
+    def combo_seq(self, hit_frames, stun_between=True, bot_flags=0):
+        out = [fr(0), fr(1)]
+        dmg = 0.0
+        for n in range(2, max(hit_frames) + 3):
+            if n in hit_frames:
+                dmg += 5.0
+                out.append(fr(n, bot=fighter(flags=bot_flags), opp=fighter(damage=dmg, flags=HIT)))
+            else:
+                out.append(fr(n, opp=fighter(damage=dmg, flags=HIT if stun_between else 0)))
+        return out
+
+    def test_combo_pays_more_for_longer_combos(self):
+        t = self.only(dict(combo_bonus=0.1))
+        out = run(t, self.combo_seq([5, 15, 25, 35]))
+        self.assertEqual([round(x, 3) for x in out if x], [0.1, 0.2, 0.3])       # hits 2, 3, 4
+        self.assertEqual(t.totals["combo_hits"], 3)
+
+    def test_combo_length_and_total_caps(self):
+        t = self.only(dict(combo_bonus=0.1), combo_max_len=2)
+        out = run(t, self.combo_seq([5, 15, 25, 35, 45]))
+        self.assertEqual([round(x, 3) for x in out if x], [0.1, 0.2, 0.2, 0.2])
+        t = self.only(dict(combo_bonus=0.1), combo_cap=0.25)
+        run(t, self.combo_seq([5, 15, 25, 35]))
+        self.assertAlmostEqual(t.totals["combo_reward"], 0.25)
+        self.assertEqual(t.totals["combo_hits"], 3)                              # detections are still counted
+
+    def test_combo_near_misses(self):
+        def total(hits=(5, 15, 25), **kw):
+            t = self.only(dict(combo_bonus=0.1))
+            run(t, self.combo_seq(set(hits), **kw))
+            return t.totals["combo_reward"]
+        self.assertEqual(total(stun_between=False), 0.0)       # opponent left hitstun between hits: separate hits
+        self.assertEqual(total(bot_flags=HIT), 0.0)            # trades are not combos
+        self.assertEqual(total(hits=(5, 7, 9)), 0.0)           # one multi-hit move, hits 2 frames apart
+        self.assertEqual(total(hits=(5,)), 0.0)                # a single hit
+
+    # -- 4. recovery --------------------------------------------------------------
+    def excursion(self, n_off, back_x=50.0, start=2):
+        out = [fr(0), fr(1)]
+        for i in range(n_off):
+            out.append(fr(start + i, bot=fighter(pos_x=100.0, pos_y=-8.0, flags=1)))
+        out.append(fr(start + n_off, bot=fighter(pos_x=back_x, pos_y=0.0)))
+        return out
+
+    def test_recovery_bonus(self):
+        t = self.only(dict(recovery_bonus=0.5))
+        out = run(t, self.excursion(40))
+        self.assertAlmostEqual(out[-1], 0.5)
+        self.assertEqual(t.totals["recoveries"], 1)
+
+    def test_recovery_by_grabbing_the_ledge(self):
+        from training.rl import _CLIFF_STATUSES
+        cliff = sorted(_CLIFF_STATUSES)[0]
+        t = self.only(dict(recovery_bonus=0.5))
+        frames = self.excursion(40)[:-1] + [fr(42, bot=fighter(pos_x=82.0, pos_y=-3.0, status_kind=cliff))]
+        self.assertAlmostEqual(run(t, frames)[-1], 0.5)
+
+    def test_recovery_near_misses(self):
+        t = self.only(dict(recovery_bonus=0.5))
+        run(t, self.excursion(10))                                  # a hop off the edge
+        self.assertEqual(t.totals["recoveries"], 0)
+        t = self.only(dict(recovery_bonus=0.5))
+        run(t, self.excursion(40)[:-1] + [fr(42, bot=fighter(pos_x=0.0, stocks=2))])   # never came back: lost the stock
+        self.assertEqual(t.totals["recoveries"], 0)
+
+    def test_recovery_cooldown_stops_ledge_drop_loops(self):
+        t = self.only(dict(recovery_bonus=0.5), recovery_cooldown=500)
+        run(t, self.excursion(40) + renumber(self.excursion(40), 100))
+        self.assertEqual(t.totals["recoveries"], 1)
+
+    def last_jump(self, x, y, before=1, after=0):
+        t = self.only(dict(last_jump_penalty=0.3))
+        out = run(t, [fr(0), fr(1), fr(2, bot=fighter(pos_x=x, pos_y=y, jumps_left=before)),
+                      fr(3, bot=fighter(pos_x=x, pos_y=y, jumps_left=after))])
+        return round(out[-1], 6), t.totals["last_jumps"]
+
+    def test_last_jump_far_offstage_is_penalised(self):
+        self.assertEqual(self.last_jump(140.0, -30.0), (-0.3, 1))
+
+    def test_last_jump_near_misses(self):
+        self.assertEqual(self.last_jump(85.0, -5.0), (0.0, 0))        # close to the ledge
+        self.assertEqual(self.last_jump(20.0, 0.0), (0.0, 0))         # onstage
+        self.assertEqual(self.last_jump(140.0, -30.0, before=2, after=1), (0.0, 0))   # not the last jump
+        self.assertEqual(self.last_jump(140.0, -30.0, before=0, after=0), (0.0, 0))
+
+    def test_self_destruct_penalty_stays(self):
+        from training.rl import RewardConfig, RewardTracker
+        t = RewardTracker(RewardConfig(self_destruct_window=10))
+        run(t, [fr(i) for i in range(20)])
+        t.step(fr(20, bot=fighter(stocks=2)))
+        self.assertEqual(t.totals["self_destructs"], 1)
+
+    # -- 5. potential-based stage control ---------------------------------------------
+    def stage_seq(self, n=40):
+        rng = np.random.default_rng(3)
+        frames = [fr(0)]
+        for i in range(1, n + 1):
+            frames.append(fr(i, bot=fighter(pos_x=float(rng.uniform(-120, 120))), opp=fighter(pos_x=float(rng.uniform(-120, 120)))))
+        return frames
+
+    def test_potential_shaping_telescopes(self):
+        for gamma, mult in ((0.9, 1.0), (0.99, 0.5)):
+            t = self.only(dict(stage_control_weight=0.5), gamma=gamma, mult=mult)
+            frames = self.stage_seq()
+            out = run(t, frames)
+            phi0, phiT = t.potential(frames[0]), t.potential(frames[-1])
+            T = len(frames) - 1
+            disc = sum(gamma ** (i - 1) * r for i, r in enumerate(out) if i >= 1)
+            self.assertAlmostEqual(disc, gamma ** T * phiT - phi0, places=9)
+            # with the terminal potential 0 the whole episode sums to -Phi(start)
+            fin = t.finish()
+            self.assertAlmostEqual(disc + gamma ** T * fin, -phi0, places=9)
+            self.assertAlmostEqual(t.totals["stage_control_reward"], sum(out) + fin)
+
+    def test_potential_prefers_the_bot_central_and_the_opponent_at_the_ledge(self):
+        t = self.only(dict(stage_control_weight=1.0))
+        good = t.potential(fr(0, bot=fighter(pos_x=0.0), opp=fighter(pos_x=75.0)))
+        bad = t.potential(fr(0, bot=fighter(pos_x=75.0), opp=fighter(pos_x=0.0)))
+        off = t.potential(fr(0, bot=fighter(pos_x=0.0), opp=fighter(pos_x=130.0)))
+        self.assertGreater(good, 0)
+        self.assertLess(bad, 0)
+        self.assertAlmostEqual(off, 1.0)
+
+    def test_stage_control_is_zero_while_nothing_moves_at_gamma_one(self):
+        t = self.only(dict(stage_control_weight=0.5), gamma=1.0)
+        out = run(t, [fr(i, opp=fighter(pos_x=70.0)) for i in range(10)])
+        self.assertEqual(out, [0.0] * 10)
+
+    # -- decay and caps -----------------------------------------------------------------
+    def test_shaping_multiplier_decays_linearly_to_the_floor(self):
+        from training.rl import RewardConfig, shaping_multiplier
+        c = RewardConfig(shaping_decay_matches=100, shaping_floor=0.2)
+        self.assertEqual(shaping_multiplier(c, 0), 1.0)
+        self.assertAlmostEqual(shaping_multiplier(c, 50), 0.6)
+        self.assertAlmostEqual(shaping_multiplier(c, 100), 0.2)
+        self.assertAlmostEqual(shaping_multiplier(c, 5000), 0.2)
+        self.assertEqual(shaping_multiplier(RewardConfig(shaping_decay_matches=0), 999), 1.0)
+
+    def test_decay_scales_shaping_but_not_the_base_reward(self):
+        from training.rl import RewardConfig, RewardTracker
+        for mult in (1.0, 0.5):
+            t = RewardTracker(RewardConfig(**dict(NO_SHAPING, spike_bonus=1.5, offstage_penalty=0.0)), shaping_mult=mult)
+            out = run(t, self.spike_seq())
+            self.assertAlmostEqual(t.totals["spike_reward"], 1.5 * mult)
+            self.assertAlmostEqual(sum(out), 0.01 * 15.0 + 1.5 * mult)     # the 15% damage is full weight
+
+    def test_per_match_caps(self):
+        t = self.only(dict(spike_bonus=1.5), spike_cap=2.0)
+        for k in range(3):
+            run(t, renumber(self.spike_seq(), 100 * k))
+        self.assertAlmostEqual(t.totals["spike_reward"], 2.0)
+        self.assertEqual(t.totals["spikes"], 3)
+        t = self.only(dict(last_jump_penalty=0.3), last_jump_cap=0.5)
+        for k in range(3):
+            run(t, [fr(10 * k, bot=fighter(pos_x=140.0, pos_y=-30.0, jumps_left=1)),
+                    fr(10 * k + 1, bot=fighter(pos_x=140.0, pos_y=-30.0, jumps_left=0))])
+        self.assertAlmostEqual(t.totals["last_jump_reward"], -0.5)
+
+    def test_env_var_sets_a_weight(self):
+        from training.rl import RewardConfig, _from_env
+        old = os.environ.get("SCPU_RL_REWARD_SPIKE_BONUS")
+        os.environ["SCPU_RL_REWARD_SPIKE_BONUS"] = "3.5"
+        try:
+            self.assertEqual(_from_env(RewardConfig, "SCPU_RL_REWARD_").spike_bonus, 3.5)
+        finally:
+            if old is None:
+                os.environ.pop("SCPU_RL_REWARD_SPIKE_BONUS")
+            else:
+                os.environ["SCPU_RL_REWARD_SPIKE_BONUS"] = old
 
 
 @SKIP
@@ -161,7 +450,7 @@ class PolicyTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def make(self, name, **kw):
+    def make(self, name, reward=None, **kw):
         from training.rl import RewardConfig, RLConfig, RLPolicy
         kw.setdefault("async_learn", False)
         kw.setdefault("matches_per_update", 1)
@@ -173,7 +462,7 @@ class PolicyTests(unittest.TestCase):
         kw.setdefault("out_dir", str(self.root / "data" / name))
         kw.setdefault("ckpt_dir", str(self.root / "ck" / name))
         cfg = RLConfig(run=name, **kw)
-        return RLPolicy(cfg, RewardConfig(), checkpoint=self.bc, log=lambda s: None)
+        return RLPolicy(cfg, reward or RewardConfig(), checkpoint=self.bc, log=lambda s: None)
 
     def play(self, p, winner=1, n=240):
         """One scripted match through the policy, with the watcher's events."""
@@ -207,6 +496,19 @@ class PolicyTests(unittest.TestCase):
         ups = read_csv(p.out_dir / "updates.csv")
         self.assertEqual(len(ups), 2)
         self.assertGreater(float(ups[0]["kl_ref"]), -1e-6)
+
+    def test_matches_csv_has_per_term_columns_and_the_decay(self):
+        from training.rl import MATCH_COLUMNS, RewardConfig, SHAPING_COLUMNS
+        p = self.make("cols", reward=RewardConfig(shaping_decay_matches=2, shaping_floor=0.0))
+        self.play(p)
+        self.play(p)
+        rows = read_csv(p.out_dir / "matches.csv")
+        self.assertEqual(list(rows[0]), MATCH_COLUMNS)
+        for col in ("edgeguard_reward", "spike_reward", "combo_reward", "recovery_reward", "last_jump_reward",
+                    "stage_control_reward", "shaping_mult", "shaping_total", "edgeguards", "spikes", "combo_hits"):
+            self.assertIn(col, rows[0])
+        self.assertEqual(set(SHAPING_COLUMNS) - set(rows[0]), set())
+        self.assertEqual([float(r["shaping_mult"]) for r in rows], [1.0, 0.5])
 
     def test_value_warmup_leaves_the_policy_alone(self):
         p = self.make("w", value_warmup_updates=1)
