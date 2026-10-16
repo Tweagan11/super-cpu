@@ -10,6 +10,7 @@ from bridge.logger import LogRejected, frame_at, load_match
 from bridge.protocol import Inputs
 from training import actions as A
 from training.features import (
+    _content_key,
     PER_SLOT,
     PREV_UNKNOWN,
     FeatureConfig,
@@ -36,6 +37,10 @@ class FeatureTests(unittest.TestCase):
         cls.paths = write_synthetic_matches(cls.tmp.name, n_matches=3, n_frames=400, drop=0.15,
                                             no_input=0.1, seed=7)
         cls.matches = [load_match(p, expect_version="13.0.4") for p in cls.paths]
+        # build_dataset orders matches by content, so index them the same way
+        order = sorted(range(len(cls.matches)), key=lambda i: _content_key(cls.matches[i]))
+        cls.paths = [cls.paths[i] for i in order]
+        cls.matches = [cls.matches[i] for i in order]
 
     @classmethod
     def tearDownClass(cls):
