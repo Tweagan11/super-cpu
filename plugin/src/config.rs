@@ -20,7 +20,7 @@
 //! controller needed, the card survives rematches, docs/hooks.md section 3).
 //! `cpu_controller_index` overrides which `controller_index` the CPU hook
 //! treats as the bot; leave it out unless the match-start log is wrong.
-//! `auto_menu = true` lets the PC press menu buttons on the bot's controller
+//! `auto_menu = true` lets the PC press menu buttons (on `menu_npad`, default the lowest connected controller)
 //! outside matches (SSB-25, off by default).
 //! `force_fighter = true` makes the ports in `force_ports` (1-based, `[2]` or
 //! `2,3`) play green R.O.B. with costume `force_costume` (SSB-24, off by
@@ -46,6 +46,11 @@ pub struct Config {
     pub drive_cpu: bool,
     /// controller_index of the bot's CPU, if auto-detection needs help.
     pub cpu_controller_index: Option<i32>,
+    /// Which controller (npad number, 0-based) gets the menu presses.
+    /// None: the lowest connected one, usually your own controller. The bot's
+    /// port can be a CPU card with no controller (drive_cpu), and any
+    /// controller can press A on results or + on the CSS.
+    pub menu_npad: Option<u32>,
     /// Install the menu press hook and apply kind 8 packets (docs/hooks.md).
     pub auto_menu: bool,
     /// Force R.O.B. on `force_ports` (docs/hooks.md section 6).
@@ -60,7 +65,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { pc_ip: "192.168.1.50".into(), udp_port: 4243, bot_port: 2, fim_player_idx: None, cpu_probe: true, auto_menu: false, drive_cpu: false, cpu_controller_index: None,
+        Self { pc_ip: "192.168.1.50".into(), udp_port: 4243, bot_port: 2, fim_player_idx: None, cpu_probe: true, auto_menu: false, drive_cpu: false, cpu_controller_index: None, menu_npad: None,
             force_fighter: false, force_ports: vec![2], force_costume: 5, force_copy_hook: true }
     }
 }
@@ -136,6 +141,11 @@ fn parse_into(text: &str, cfg: &mut Config) {
                 }
             }
             "auto_menu" => cfg.auto_menu = matches!(value, "1" | "true" | "on"),
+            "menu_npad" => {
+                if let Ok(n) = value.parse() {
+                    cfg.menu_npad = Some(n);
+                }
+            }
             "force_fighter" => cfg.force_fighter = matches!(value, "1" | "true" | "on"),
             "force_copy_hook" => cfg.force_copy_hook = !matches!(value, "0" | "false" | "off"),
             "force_ports" => {
@@ -226,7 +236,7 @@ mod tests {
     #[test]
     fn template_parses_back() {
         let d = Config::default();
-        let mut c = Config { pc_ip: String::new(), udp_port: 0, bot_port: 1, fim_player_idx: None, cpu_probe: false, auto_menu: false, drive_cpu: true, cpu_controller_index: Some(9),
+        let mut c = Config { pc_ip: String::new(), udp_port: 0, bot_port: 1, fim_player_idx: None, cpu_probe: false, auto_menu: false, drive_cpu: true, cpu_controller_index: Some(9), menu_npad: Some(3),
             force_fighter: false, force_ports: vec![], force_costume: 0, force_copy_hook: false };
         parse_into(&template(&d), &mut c);
         assert_eq!((c.pc_ip, c.udp_port, c.bot_port), (d.pc_ip, d.udp_port, d.bot_port));

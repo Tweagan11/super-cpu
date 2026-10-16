@@ -74,7 +74,7 @@ pub fn main() {
     input::init(cfg.bot_port, cfg.bot_player_idx(), cfg.fim_player_idx.is_some(), ack_tx);
     frame::install();
     control::install(cfg.cpu_probe, cfg.drive_cpu, cfg.cpu_controller_index);
-    menu_hook::install(cfg.bot_port as u32 - 1, cfg.auto_menu);
+    menu_hook::install(cfg.menu_npad, cfg.auto_menu);
     force_hook::install(cfg.force_fighter, &cfg.force_ports, cfg.force_costume, cfg.force_copy_hook);
 
     // Networking never runs on the game thread.

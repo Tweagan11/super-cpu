@@ -28,8 +28,14 @@ const NAME_OFFSET: usize = 8;
 
 pub static SCENE_HOOK: AtomicBool = AtomicBool::new(false);
 pub static MENU_HOOK: AtomicBool = AtomicBool::new(false);
-/// Bot's controller, matched on `Controller::npad_number` (0-based).
-static BOT_NPAD: AtomicU32 = AtomicU32::new(1);
+/// Controller that gets menu presses, matched on `Controller::npad_number`.
+/// AUTO: the lowest npad seen with a nonzero style (connected). The bot's port
+/// is often a CPU card with no controller of its own (drive_cpu), and any
+/// controller can advance results or start the match from the CSS.
+const AUTO: u32 = u32::MAX;
+static MENU_NPAD: AtomicU32 = AtomicU32::new(AUTO);
+/// Auto mode's current pick.
+static AUTO_NPAD: AtomicU32 = AtomicU32::new(AUTO);
 
 /// Raw controller state the menus read (Training Modpack layout). Only the
 /// fields we touch are named.
@@ -103,7 +109,18 @@ unsafe fn on_controller_update(ctrl: *mut Controller, a1: u64, a2: u64, a3: u64)
             crate::log::log(format!("controller update: style {} npad {} id {}", key.0, key.1, key.2));
         }
     }
-    if c.npad_number != BOT_NPAD.load(Ordering::Relaxed) {
+    let mut target = MENU_NPAD.load(Ordering::Relaxed);
+    if target == AUTO {
+        if c.style != 0 && c.npad_number < AUTO_NPAD.load(Ordering::Relaxed) {
+            AUTO_NPAD.store(c.npad_number, Ordering::Relaxed);
+            crate::log::log(format!(
+                "menu presses go to npad {} (lowest connected controller, style {}); set menu_npad to pick another",
+                c.npad_number, c.style
+            ));
+        }
+        target = AUTO_NPAD.load(Ordering::Relaxed);
+    }
+    if c.npad_number != target {
         return ret;
     }
     if !scene::menu_presses_allowed() || crate::state::live_frame().is_some() {
@@ -117,9 +134,9 @@ unsafe fn on_controller_update(ctrl: *mut Controller, a1: u64, a2: u64, a3: u64)
     ret
 }
 
-/// `npad` is the bot's controller number (0-based), `menu` turns on the
-/// press hook. The scene hook is read only and always installed.
-pub fn install(npad: u32, menu: bool) {
+/// `npad` is the controller that gets menu presses (None: lowest connected),
+/// `menu` turns on the press hook. The scene hook is read only and always installed.
+pub fn install(npad: Option<u32>, menu: bool) {
     if !crate::version::game_version_ok() {
         crate::log::log("scene and menu hooks off: game version mismatch (fixed offsets)");
         return;
@@ -128,10 +145,11 @@ pub fn install(npad: u32, menu: bool) {
     SCENE_HOOK.store(true, Ordering::Relaxed);
     crate::log::log(format!("scene hook installed at text+{SCENE_CHANGE_OFFSET:#x}"));
     if menu {
-        BOT_NPAD.store(npad, Ordering::Relaxed);
+        MENU_NPAD.store(npad.unwrap_or(AUTO), Ordering::Relaxed);
         skyline::install_hook!(on_controller_update);
         MENU_HOOK.store(true, Ordering::Relaxed);
-        crate::log::log(format!("auto_menu on: controller hook at text+{CONTROLLER_UPDATE_OFFSET:#x}, bot npad {npad}"));
+        let who = npad.map_or("the lowest connected controller".to_string(), |n| format!("npad {n}"));
+        crate::log::log(format!("auto_menu on: controller hook at text+{CONTROLLER_UPDATE_OFFSET:#x}, presses go to {who}"));
     } else {
         crate::log::log("auto_menu off: menu presses from the PC are ignored");
     }

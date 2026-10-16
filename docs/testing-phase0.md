@@ -281,7 +281,7 @@ Write down the exact names of the CSS, match and results scenes. If they don't c
 
 ### 11c. Menu presses (auto_menu = true)
 
-Set `auto_menu = true` in `config.toml` and boot. Expect `auto_menu on: controller hook at text+0x36650c0, bot npad N` and `controller update: style S npad N id I` lines: write down which (style, npad) combos show up and whether the bot port's controller is one of them. If the game crashes on boot or at the first menu, set `auto_menu` back to false and send the crash report (the hook prototype is the top risk, `hooks.md` section 5).
+Set `auto_menu = true` in `config.toml` and boot. Expect `auto_menu on: controller hook at text+0x36650c0, presses go to the lowest connected controller`, `controller update: style S npad N id I` lines, and `menu presses go to npad N`. That should be your own controller (any controller can advance the menus). If it picks the wrong one, set `menu_npad = N` in config.toml. If the game crashes on boot or at the first menu, set `auto_menu` back to false and send the crash report (the hook prototype is the top risk, `hooks.md` section 5).
 
 Then run `python -m bridge.run --policy walk --auto-rematch` and finish a match. The `[rematch]` lines say what it pressed; `[run] scene:` shows `menu pulses applied` climbing.
 
