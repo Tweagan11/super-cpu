@@ -14,7 +14,7 @@ data/matches/<match_id>.json   copy of the header, for grepping without numpy
 
 `match_id` is `YYYYMMDD-HHMMSS-<6 hex>`, UTC start time plus a random suffix.
 
-Write one with `python -m bridge.udp_listen --log` (or through the eval harness). Read one with:
+Write one with `python -m bridge.udp_listen --log` (human or CPU play), `python -m bridge.run --log` (the bot playing), or through the eval harness. Read one with:
 
 ```python
 from bridge.logger import load_match
@@ -43,7 +43,8 @@ The `.npz` holds three arrays: `header` (the JSON as a 0-d string), `frames`, an
 | `stage_source` | `stage_id` when the id maps to Battlefield or FD/Omega, else `flag` (from `--stage`) |
 | `ruleset` | `{"stocks": 3, "items": false, "time_limit_min": null}` for v1 |
 | `ports` | list of 2, see below |
-| `inputs_present` | false until inputs are captured; then the input columns are real |
+| `inputs_present` | true if any row of either port has `input_valid = 1` |
+| `input_capture` | where the inputs came from, see below. Added without a schema bump (new key, old keys unchanged) |
 | `frame_count` | rows in the file |
 | `first_frame`, `last_frame` | game frame counter at each end |
 | `frames_skipped` | gaps in the frame counter (dropped packets) |
@@ -75,7 +76,27 @@ Each `ports` entry: `slot` (1 or 2), `fighter_kind`, `fighter_name`, `controller
 | buttons | u32 | `bridge/buttons.py` bits |
 | input_valid | u8 | 1 if this row's inputs were recorded, 0 if zero-filled |
 
-Inputs: the plugin doesn't send human inputs yet, so every input column is 0 with `input_valid = 0` and `inputs_present: false`. The columns are reserved so the format doesn't change when inputs arrive. The bot's own inputs can be recorded today with `MatchLogger.record_inputs(port, for_frame, inputs)` once the input path calls it.
+Inputs (SSB-13): each row's input columns are the final mapped inputs that port's fighter read **on that frame**, with `input_valid = 1`. Rows with `input_valid = 0` are zero-filled and mean "unknown", not "neutral". Two sources, in this order:
+
+1. **The bot's acks** (`bridge.run --log` only). `bridge.run` remembers what it sent for each state frame; when the plugin acks `(for_frame, applied_frame)`, `MatchLogger.record_inputs(bot_port, applied_frame, inputs)` puts it on the frame it took effect, not the frame it was decided on. Repeats and neutral frames aren't acked, so on their own they stay invalid.
+2. **The plugin's capture** (state packet v3, `docs/protocol.md`). Both ports, every frame, including what the bot really got on repeat and neutral frames. This wins when both exist.
+
+So with a v3 plugin both ports are filled almost every frame (frame 0 of each match is never captured), human or bot, and the acks are a cross-check.
+
+`input_capture` header:
+
+| Key | Notes |
+| --- | --- |
+| `mapping.source` | `control_status` (from the plugin) or `none` (no control status seen, mapping unknown) |
+| `mapping.bot_port` | the plugin's `bot_port` |
+| `mapping.player_idx_by_port` | final input mapping `player_idx` logged as `[port 1, port 2]` |
+| `mapping.fim_override` | `fim_player_idx` was set in config.toml |
+| `mapping.verified` | false until port vs controller slot is confirmed on hardware (docs/hooks.md). If it turns out wrong, swap the input columns of logs with the affected mapping |
+| `rows_captured` | rows per port filled from the plugin's capture |
+| `rows_from_acks` | rows per port filled from acks |
+| `ack_capture_mismatches` | rows where an acked input and the captured one disagree. Should be 0; anything else means the frame alignment is off |
+
+`frame_at()` rebuilds `Frame.inputs` from valid rows (None elsewhere).
 
 Rows are only frames that arrived. Dropped packets leave gaps in `frame`; nothing is interpolated.
 

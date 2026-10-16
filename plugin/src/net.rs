@@ -13,7 +13,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::input::{self, ack_packet, status_packet, Ack, InputReceiver};
+use crate::input::{self, ack_packet, status_packet, Ack, InputReceiver, Inputs};
 use crate::state::{FighterState, FrameState};
 use crate::version::running_game_version;
 
@@ -21,7 +21,9 @@ pub const MAGIC: [u8; 4] = *b"SCPU";
 /// v2: heartbeat carries hook health (hook_installed, fighter_calls, frames_queued)
 /// Kinds 2, 4 and 5 were added without a bump: nothing older sends or
 /// expects them, and the heartbeat and state layouts didn't change.
-pub const PROTO_VERSION: u16 = 2;
+/// v3: state packet carries both ports' captured inputs (SSB-13), control
+/// status byte 15 is the other port's player_idx.
+pub const PROTO_VERSION: u16 = 3;
 
 pub const KIND_STATE: u16 = 1;
 pub const KIND_INPUT: u16 = 2;
@@ -33,8 +35,11 @@ pub const HEADER_LEN: usize = 12;
 /// + hook_installed (u32) + fighter_calls (u32) + frames_queued (u32)
 pub const HEARTBEAT_LEN: usize = HEADER_LEN + 8 + 8 + 12;
 pub const FIGHTER_LEN: usize = 64;
-/// header + frame (u32) + stage_id (i32) + 2 fighters
-pub const STATE_LEN: usize = HEADER_LEN + 8 + 2 * FIGHTER_LEN;
+/// One port's captured inputs: 4 x i8 sticks + u32 buttons.
+pub const INPUTS_LEN: usize = 8;
+/// header + frame (u32) + stage_id (i32) + 2 fighters + input_flags (u32)
+/// + 2 captured inputs
+pub const STATE_LEN: usize = HEADER_LEN + 8 + 2 * FIGHTER_LEN + 4 + 2 * INPUTS_LEN;
 
 const HEARTBEAT_EVERY: Duration = Duration::from_millis(500);
 const RETRY_AFTER: Duration = Duration::from_secs(5);
@@ -94,8 +99,21 @@ pub fn state_packet(seq: u32, s: &FrameState) -> [u8; STATE_LEN] {
     buf[12..16].copy_from_slice(&s.frame.to_le_bytes());
     buf[16..20].copy_from_slice(&s.stage_id.to_le_bytes());
     write_fighter(&mut buf[20..20 + FIGHTER_LEN], &s.fighters[0]);
-    write_fighter(&mut buf[20 + FIGHTER_LEN..STATE_LEN], &s.fighters[1]);
+    write_fighter(&mut buf[20 + FIGHTER_LEN..20 + 2 * FIGHTER_LEN], &s.fighters[1]);
+    let at = 20 + 2 * FIGHTER_LEN;
+    buf[at..at + 4].copy_from_slice(&s.input_flags.to_le_bytes());
+    write_inputs(&mut buf[at + 4..at + 4 + INPUTS_LEN], &s.inputs[0]);
+    write_inputs(&mut buf[at + 4 + INPUTS_LEN..STATE_LEN], &s.inputs[1]);
     buf
+}
+
+/// Same order as the input packet and the game's MappedInputs: sticks, then buttons.
+fn write_inputs(buf: &mut [u8], i: &Inputs) {
+    buf[0] = i.stick_x as u8;
+    buf[1] = i.stick_y as u8;
+    buf[2] = i.cstick_x as u8;
+    buf[3] = i.cstick_y as u8;
+    buf[4..8].copy_from_slice(&i.buttons.to_le_bytes());
 }
 
 fn send(sock: &UdpSocket, packet: &[u8], target: &str) -> bool {
@@ -248,5 +266,45 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
         }
         input::RECEIVING.store(false, Ordering::Relaxed);
         sleep(RETRY_AFTER);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    /// Same values as golden_state() in bridge/tests/test_capture.py.
+    pub fn golden_frame() -> FrameState {
+        let f = |dmg: f32, side: f32| FighterState {
+            fighter_kind: 0x2D, pos_x: 12.5 * side, pos_y: 3.25, vel_x: -1.5 * side, vel_y: 2.75,
+            damage: dmg, shield_hp: 37.5, stocks: 3, status_kind: 0x47, motion_kind: 0xABCDEF0123,
+            anim_frame: 4.0, facing: -1, jumps_left: 1, flags: 0b11,
+        };
+        FrameState {
+            frame: 1234,
+            stage_id: 1,
+            fighters: [f(42.5, 1.0), f(10.0, -1.0)],
+            inputs: [
+                Inputs { stick_x: 127, stick_y: -128, cstick_x: 0, cstick_y: 40, buttons: 0x5 },
+                Inputs { stick_x: -64, stick_y: 0, cstick_x: 0, cstick_y: 0, buttons: 0x10008 },
+            ],
+            input_flags: input::CAP_P1_VALID | input::CAP_P2_VALID | input::CAP_P2_DRIVEN,
+        }
+    }
+
+    #[test]
+    fn state_v3_golden() {
+        assert_eq!(STATE_LEN, 168);
+        let b = state_packet(9, &golden_frame());
+        // the v2 part is unchanged apart from the version, so the old
+        // golden (bridge/tests/test_fields.py) is a prefix of this one
+        assert_eq!(&hex(&b[..4]), "53435055");
+        assert_eq!(&hex(&b[4..6]), "0300");
+        assert_eq!(&hex(&b[148..]), "0b0000007f80002805000000c000000008000100");
+        println!("STATE_V3_HEX {}", hex(&b));
     }
 }

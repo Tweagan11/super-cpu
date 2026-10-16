@@ -201,6 +201,44 @@ Run it twice: Switch on Wi-Fi, then wired (USB Ethernet adapter in the dock). Wr
 
 The p99 round trip is the training delay (training/README.md: "train with input delay randomized from 0 to the worst case measured in SSB-7"), and it's the smallest `--delay` that won't drop inputs as late. Expect 2 frames at best (state for frame N leaves when N + 1 starts, so N + 1 is already gone), 3 to 4 on a good network.
 
+## 10. Input capture: human inputs in the stream (SSB-13)
+
+Plugin and bridge are now protocol v3, so rebuild and recopy the `.nro` first (an old plugin shows up as "protocol v2, expected v3").
+
+### 10a. PC side first
+
+```
+python -m bridge.udp_listen
+python -m bridge.fake_switch
+```
+
+Each fighter line now ends with the captured input, like `in L(+100,  +0) C(  +0,  +0) ATTACK`. The fake's sticks sweep and press jab every 40 frames. Then the whole thing in one process:
+
+```
+python -m bridge.run --policy scripted --log --eval 3 --model scripted --min-seconds 2 --results /tmp/r.csv
+python -m bridge.fake_switch --matches 3 --match-seconds 4
+```
+
+Expect 3 `[log] wrote` lines, 3 `[eval] game` lines and `done: 2/3 wins`. `python -m bridge.inspect_log data/matches/*.npz` says `inputs: present`.
+
+### 10b. On the Switch
+
+Versus match, you on port 1, a second controller on port 2, **no bridge running**, `python -m bridge.udp_listen`:
+
+| Do this | Expect |
+| --- | --- |
+| Hold right on P1's stick | P1's line shows `L(+1xx,  +0)`, P2's stays near 0 |
+| Hold right on P2's controller | P2's line shows it, P1's doesn't |
+| Press A, B, X, shield on P1 | `ATTACK`, `SPECIAL`, `JUMP`, `GUARD ...` on the P1 line only (names depend on your button config, that's the point: these are mapped inputs) |
+| Flick the c-stick | `C(...)` moves, `CSTICK_ON` shows |
+| Stand still | `L(  +0,  +0) C(  +0,  +0) -`, no stray buttons |
+| Pause | lines stop (no state while paused), no crash |
+| Watch the 5 s status line | `captured as P1/P2 player_idx [0, 1]` |
+
+**Port or controller slot, again.** Swap which controller picks which port at character select (like 9c). If P1's line still follows the controller on port 1, `player_idx` is the port. If the lines follow the controllers instead, it's the slot: tell me, set `fim_player_idx` (that swaps both captured ports), and note that logs made before have the input columns swapped (their header's `input_capture.mapping` says which mapping they used).
+
+Then with the bridge driving P2 (`python -m bridge.run --policy walk --log`): finish a match and run `inspect_log` on it. Both ports should be `inputs_present`, and the `.json` header's `input_capture.ack_capture_mismatches` should be 0. Nonzero means the captured frame and the applied frame disagree: send me the header.
+
 ## If nothing shows up
 
 | Symptom | Likely cause |
@@ -209,7 +247,9 @@ The p99 round trip is the training delay (training/README.md: "train with input 
 | No `config.toml` was created | Plugin didn't load. Check the `.nro` path and that Skyline/ARCropolis load at all |
 | Game crashes on boot | Remove the `.nro` and tell me the crash report from `sd:/atmosphere/crash_reports/` |
 | Missing rate above a few percent on Wi-Fi | Expected on busy Wi-Fi; try a USB Ethernet adapter in the dock |
-| Listener says "protocol v1, expected v2" | The Switch still has the old plugin. Rebuild and recopy the `.nro` |
+| Listener says "protocol v1, expected v2" (or "v2, expected v3") | The Switch still has the old plugin. Rebuild and recopy the `.nro` |
+| Fighter lines show `in --` on a v3 plugin | Inputs not captured: input hook not installed, or `live_frame()` keeps losing its try_lock (see hooks.md, FIM thread question) |
+| Inputs show on the wrong port's line | `player_idx` is the controller slot, see 10b |
 | "hook NOT installed" | The game's common module never triggered the hook install. Check that `libnro_hook.nro` is in the plugins folder |
 | Hook installed, fighter frames stays 0 during a match | The hooked function isn't running for fighters. Send me the listener output |
 | Fighter frames climbing, frames queued stays 0 | The hook runs but the state reader drops every frame. Send me the listener output |

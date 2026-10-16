@@ -10,7 +10,9 @@ from dataclasses import dataclass
 from .protocol import FRAME_SIZE, Frame, Inputs, decode_frame, encode_frame
 
 MAGIC = b"SCPU"
-PROTO_VERSION = 2  # v2: heartbeat carries hook health. Kinds 2, 4, 5 added without a bump.
+PROTO_VERSION = 3  # v2: heartbeat carries hook health. Kinds 2, 4, 5 added without a bump.
+# v3: state carries both ports' captured inputs (SSB-13), control status byte 15
+# is the other port's player_idx.
 
 KIND_STATE = 1
 KIND_INPUT = 2
@@ -71,10 +73,10 @@ def pack_heartbeat(
     )
 
 
-STATE_LEN = HEADER_LEN + FRAME_SIZE  # 148
+STATE_LEN = HEADER_LEN + FRAME_SIZE  # 168 (v3)
 
 
-def pack_state(seq: int, frame: Frame, bot_index: int = 0) -> bytes:
+def pack_state(seq: int, frame: Frame, bot_index: int | None = None) -> bytes:
     return pack_header(KIND_STATE, seq) + encode_frame(frame, bot_index)
 
 
@@ -159,15 +161,17 @@ def unpack_ack(buf: bytes) -> Ack:
 
 
 # --- Control status (kind 5, Switch to PC, with every heartbeat) -------------
-# bot_port, bot_player_idx, flags, reserved, then 10 u32 counters, then the
-# game's own mapped inputs for the bot's controller (4 x i8 sticks, u32 buttons)
-CONTROL_STATUS_FMT = "<BbBx10I4bI"
+# bot_port, bot_player_idx, flags, other_player_idx (v3, was reserved), then 10
+# u32 counters, then the game's own mapped inputs for the bot's controller
+# (4 x i8 sticks, u32 buttons)
+CONTROL_STATUS_FMT = "<BbBb10I4bI"
 CONTROL_STATUS_LEN = HEADER_LEN + struct.calcsize(CONTROL_STATUS_FMT)  # 64
 
 FLAG_HOOK_INSTALLED = 1
 FLAG_SESSION_ACTIVE = 2
 FLAG_RECEIVING = 4
 FLAG_CPU_PROBE = 8
+FLAG_FIM_OVERRIDE = 16  # fim_player_idx is set in config.toml
 
 
 @dataclass(frozen=True)
@@ -187,6 +191,20 @@ class ControlStatus:
     cpu_calls: int = 0
     cpu_idx_seen: int = 0  # bitmask of set_cpu_controls controller_index values seen
     orig: Inputs = Inputs()
+    # v3: player_idx the plugin captures as the port that isn't the bot
+    other_player_idx: int = 0
+
+    @property
+    def fim_override(self) -> bool:
+        return bool(self.flags & FLAG_FIM_OVERRIDE)
+
+    def player_idx_by_port(self) -> list[int]:
+        """Final input mapping player_idx captured as [port 1, port 2]."""
+        out = [0, 1]
+        if self.bot_port in (1, 2):
+            out[self.bot_port - 1] = self.bot_player_idx
+            out[2 - self.bot_port] = self.other_player_idx
+        return out
 
     @property
     def hook_installed(self) -> bool:
@@ -216,7 +234,7 @@ def bits_list(mask: int) -> list[int | str]:
 def pack_control_status(seq: int, s: ControlStatus) -> bytes:
     o = s.orig
     return pack_header(KIND_CONTROL_STATUS, seq) + struct.pack(
-        CONTROL_STATUS_FMT, s.bot_port, s.bot_player_idx, s.flags,
+        CONTROL_STATUS_FMT, s.bot_port, s.bot_player_idx, s.flags, s.other_player_idx,
         s.fim_calls, s.idx_seen, s.inputs_rx, s.applied, s.late, s.rejected, s.repeats,
         s.neutral, s.cpu_calls, s.cpu_idx_seen,
         o.stick_x, o.stick_y, o.cstick_x, o.cstick_y, o.buttons,
@@ -228,7 +246,7 @@ def unpack_control_status(buf: bytes) -> ControlStatus:
     if h.kind != KIND_CONTROL_STATUS or len(buf) < CONTROL_STATUS_LEN:
         raise BadPacket("not a control status packet")
     v = struct.unpack_from(CONTROL_STATUS_FMT, buf, HEADER_LEN)
-    return ControlStatus(h, *v[:13], orig=Inputs(*v[13:]))
+    return ControlStatus(h, *v[:3], *v[4:14], orig=Inputs(*v[14:]), other_player_idx=v[3])
 
 
 def unpack_heartbeat(buf: bytes) -> Heartbeat:

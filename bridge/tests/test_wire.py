@@ -36,7 +36,7 @@ class WireTests(unittest.TestCase):
     def test_matches_rust_byte_layout(self):
         # Built by hand the same way net.rs::heartbeat_packet does it.
         expected = (
-            b"SCPU" + (2).to_bytes(2, "little") + (3).to_bytes(2, "little")
+            b"SCPU" + (3).to_bytes(2, "little") + (3).to_bytes(2, "little")
             + (5).to_bytes(4, "little") + (900).to_bytes(8, "little")
             + b"13.0.4\0\0" + (1).to_bytes(4, "little") + (77).to_bytes(4, "little")
             + (30).to_bytes(4, "little")
@@ -58,8 +58,8 @@ class StateTests(unittest.TestCase):
         return Fighter(kind, 1.5, -2.0, 0.0, 0.0, dmg, 0.0, 3, 7, 0xABCDEF0123, 4.0, -1, 0, 1)
 
     def test_size_matches_plugin(self):
-        # plugin/src/net.rs: STATE_LEN = 12 + 8 + 2 * 64
-        self.assertEqual(STATE_LEN, 148)
+        # plugin/src/net.rs: STATE_LEN = 12 + 8 + 2 * 64 + 4 + 2 * 8 (v3)
+        self.assertEqual(STATE_LEN, 168)
 
     def test_state_round_trip(self):
         f = Frame(1234, 0, self._fighter(0x2D, 42.5), self._fighter(0, 10.0))

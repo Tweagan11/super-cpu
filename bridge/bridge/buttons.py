@@ -32,3 +32,14 @@ NONE = 0
 
 # Stick values are i8, -128..127. Full tilt is 127.
 STICK_MAX = 127
+
+
+# bit -> name, for printing (udp_listen). Only single-bit constants.
+NAMES = {v: k for k, v in list(globals().items()) if k.isupper() and isinstance(v, int) and v and v & (v - 1) == 0
+         and k != "STICK_MAX"}
+
+
+def names(bits: int) -> list[str]:
+    """Button names set in `bits`, lowest bit first. Unknown bits show as hex."""
+    out = [NAMES[1 << i] if (1 << i) in NAMES else hex(1 << i) for i in range(32) if bits >> i & 1]
+    return out

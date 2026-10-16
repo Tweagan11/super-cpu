@@ -9,6 +9,9 @@
 //! - SSB-6: applies inputs from the PC to the bot's port (`control.rs` hooks
 //!   the game's final input mapping, `input.rs` has the timing rules)
 //! - SSB-7: acks each applied input so the PC can measure round trip
+//! - SSB-13: captures every port's final mapped inputs and sends them with
+//!   the state packet (protocol v3), so human play can be logged for
+//!   imitation learning
 //! - SSB-10 (game version half): no state packets on a mismatched build
 //!   (`version.rs`)
 //!
@@ -55,7 +58,7 @@ pub fn main() {
     let (tx, rx) = std::sync::mpsc::sync_channel(FRAME_QUEUE);
     let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(ACK_QUEUE);
     state::init(tx);
-    input::init(cfg.bot_port, cfg.bot_player_idx(), ack_tx);
+    input::init(cfg.bot_port, cfg.bot_player_idx(), cfg.fim_player_idx.is_some(), ack_tx);
     frame::install();
     control::install(cfg.cpu_probe);
 

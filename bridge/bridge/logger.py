@@ -68,6 +68,7 @@ PLAYER_DTYPE = np.dtype([
     ("buttons", "<u4"),
     ("input_valid", "u1"),
 ])
+INPUT_FIELDS = ("stick_x", "stick_y", "cstick_x", "cstick_y", "buttons")
 
 STATE_FIELDS = [
     "fighter_kind", "pos_x", "pos_y", "vel_x", "vel_y", "damage", "shield_hp", "stocks",
@@ -146,13 +147,15 @@ class MatchLogger:
         self.on_logged = on_logged
         self.echo = echo
         self.last: LoggedMatch | None = None
+        self.control = None  # latest wire.ControlStatus, for the input mapping in the header
         self._reset()
 
     def _reset(self) -> None:
         self._frames: list[Frame] = []
         self._seqs: list[int] = []
         self._times: list[float] = []
-        self._inputs: dict[tuple[int, int], Inputs] = {}  # (port, frame) -> inputs
+        self._inputs: dict[tuple[int, int], Inputs] = {}  # (port, frame) -> inputs, from acks
+        self._captured: list[tuple[Inputs | None, Inputs | None]] = []  # per row, port order, from the plugin
         self._summary: MatchSummary | None = None
         self._match_id: str | None = None
         self._started_at: datetime | None = None
@@ -166,6 +169,9 @@ class MatchLogger:
 
     def on_heartbeat(self, hb) -> None:
         self.gate.heartbeat(hb.game_version)
+
+    def on_control_status(self, st) -> None:
+        self.control = st
 
     def on_match_start(self, ev: MatchStarted) -> None:
         self._reset()
@@ -181,11 +187,16 @@ class MatchLogger:
         self._frames.append(frame)
         self._seqs.append(seq)
         self._times.append(now - self._t0)
+        self._captured.append(frame.inputs)
         self._summary.add(frame)
 
-    def record_inputs(self, port: int, for_frame: int, inputs: Inputs) -> None:
-        """Inputs a port used on a frame (1-based port). Unused until inputs are captured."""
-        self._inputs[(port, for_frame)] = inputs
+    def record_inputs(self, port: int, frame: int, inputs: Inputs) -> None:
+        """Inputs a port used on a game frame (1-based port), from outside the
+        state stream. bridge.run calls this from the plugin's acks with the
+        frame the input took effect on (`applied_frame`). Inputs the plugin
+        captured itself (in the state packet) win over these when both exist;
+        the header counts any disagreement."""
+        self._inputs[(port, frame)] = inputs
 
     def on_match_end(self, ev: MatchEnded) -> LoggedMatch | None:
         if not self.in_match:
@@ -193,10 +204,11 @@ class MatchLogger:
         ok, why, version = self.gate.verdict()
         if ok and len(self._frames) < self.min_frames:
             ok, why = False, f"only {len(self._frames)} frames (min {self.min_frames})"
-        header = self._header(ev, version)
+        frames, players, capture = self._arrays()
+        header = self._header(ev, version, players, capture)
         result = LoggedMatch(self._match_id, ok, why, header, self._summary)
         if ok and self.write:
-            result.path = self._write(header)
+            result.path = self._write(header, frames, players)
             self.echo(f"[log] wrote {result.path} ({header['frame_count']} frames, {header['end_reason']})")
         elif not ok:
             self.echo(f"[log] NOT writing match {self._match_id}: {why}")
@@ -208,11 +220,24 @@ class MatchLogger:
 
     # building the file
 
-    def _header(self, ev: MatchEnded, version: str | None) -> dict[str, Any]:
+    def _input_mapping(self) -> dict[str, Any]:
+        """Which final input mapping player_idx was logged as which port. Not
+        verified on hardware yet (docs/hooks.md), so it's recorded to allow a
+        fix-up later."""
+        st = self.control
+        if st is None:
+            return {"source": "none", "bot_port": None, "player_idx_by_port": None,
+                    "fim_override": None, "verified": False}
+        return {"source": "control_status", "bot_port": st.bot_port,
+                "player_idx_by_port": st.player_idx_by_port(), "fim_override": st.fim_override,
+                "verified": False}
+
+    def _header(self, ev: MatchEnded, version: str | None, players: np.ndarray,
+                capture: dict[str, Any]) -> dict[str, Any]:
         s = self._summary
         final = s.final or s.first
         winner, winner_source = decide_winner(final)
-        has_inputs = [any(p == port for p, _ in self._inputs) for port in (1, 2)]
+        has_inputs = [bool(players["input_valid"][:, i].any()) for i in range(N_PORTS)]
         stage_id = final.stage_id
         frames = [f.frame for f in self._frames]
         skipped = sum(max(0, b - a - 1) for a, b in zip(frames, frames[1:]))
@@ -243,6 +268,7 @@ class MatchLogger:
                 for i, f in enumerate(fighters(final))
             ],
             "inputs_present": any(has_inputs),
+            "input_capture": {"mapping": self._input_mapping(), **capture},
             "frame_count": len(self._frames),
             "first_frame": frames[0] if frames else None,
             "last_frame": frames[-1] if frames else None,
@@ -254,7 +280,7 @@ class MatchLogger:
             "winner_source": winner_source,
         }
 
-    def _arrays(self) -> tuple[np.ndarray, np.ndarray]:
+    def _arrays(self) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         n = len(self._frames)
         frames = np.zeros(n, dtype=FRAME_DTYPE)
         frames["frame"] = [f.frame for f in self._frames]
@@ -266,16 +292,43 @@ class MatchLogger:
             col = [fighters(f)[port] for f in self._frames]
             for name in STATE_FIELDS:
                 players[name][:, port] = [getattr(x, name) for x in col]
-        for (port, for_frame), inp in self._inputs.items():
-            rows = frames["frame"] == for_frame
-            for name in ("stick_x", "stick_y", "cstick_x", "cstick_y", "buttons"):
-                players[name][rows, port - 1] = getattr(inp, name)
-            players["input_valid"][rows, port - 1] = 1
-        return frames, players
+        # 1. inputs from acks (the bot's, on the frame they took effect)
+        row_of = {int(fr): i for i, fr in enumerate(frames["frame"])}
+        from_acks = [0, 0]
+        acked: dict[tuple[int, int], Inputs] = {}
+        for (port, fr), inp in self._inputs.items():
+            row = row_of.get(fr)
+            if row is None or port not in (1, 2):
+                continue
+            acked[(row, port - 1)] = inp
+            for name in INPUT_FIELDS:
+                players[name][row, port - 1] = getattr(inp, name)
+            players["input_valid"][row, port - 1] = 1
+            from_acks[port - 1] += 1
+        # 2. inputs the plugin captured (ground truth: what the fighter read)
+        captured = [0, 0]
+        mismatches = 0
+        for row, pair in enumerate(self._captured):
+            for port, inp in enumerate(pair):
+                if inp is None:
+                    continue
+                if (row, port) in acked and acked[(row, port)] != inp:
+                    mismatches += 1
+                for name in INPUT_FIELDS:
+                    players[name][row, port] = getattr(inp, name)
+                players["input_valid"][row, port] = 1
+                captured[port] += 1
+        capture = {
+            "rows_captured": captured,
+            "rows_from_acks": from_acks,
+            # acked input vs what the plugin captured on the same frame. Should
+            # be 0; anything else means the frame alignment is off.
+            "ack_capture_mismatches": mismatches,
+        }
+        return frames, players, capture
 
-    def _write(self, header: dict[str, Any]) -> Path:
+    def _write(self, header: dict[str, Any], frames: np.ndarray, players: np.ndarray) -> Path:
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        frames, players = self._arrays()
         path = self.out_dir / f"{header['match_id']}.npz"
         tmp = path.with_suffix(".tmp.npz")
         text = json.dumps(header, indent=2)
@@ -320,5 +373,9 @@ def load_match(
 def frame_at(m: LoadedMatch, row: int) -> Frame:
     """Rebuild a protocol Frame from one logged row (handy for replaying into a policy)."""
     fs = [Fighter(**{k: m.players[row, p][k].item() for k in STATE_FIELDS}) for p in range(N_PORTS)]
-    return Frame(int(m.frames["frame"][row]), int(m.frames["stage_id"][row]), fs[0], fs[1])
+    ins = tuple(
+        Inputs(*(m.players[row, p][k].item() for k in INPUT_FIELDS)) if m.players[row, p]["input_valid"] else None
+        for p in range(N_PORTS)
+    )
+    return Frame(int(m.frames["frame"][row]), int(m.frames["stage_id"][row]), fs[0], fs[1], inputs=ins)
 

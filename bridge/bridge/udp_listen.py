@@ -13,11 +13,12 @@ import argparse
 import socket
 import time
 
+from . import buttons as B
 from .kinds import kind_name
 from .matches import FrameTracker, MatchEnded, MatchStarted, MatchWatcher  # noqa: F401 (FrameTracker re-exported)
 from .stages import stage_layout, stage_name
 from .statuses import status_name
-from .protocol import Fighter, Frame
+from .protocol import Fighter, Frame, Inputs
 from .wire import KIND_CONTROL_STATUS, BadPacket, Heartbeat, bits_list, unpack_control_status
 
 
@@ -60,13 +61,22 @@ def describe(port: int, f: Fighter) -> str:
     )
 
 
+def describe_inputs(inp: Inputs | None, driven: bool = False) -> str:
+    """Compact captured input: `in L(+100,  +0) C(  +0,  +0) ATTACK JUMP`."""
+    if inp is None:
+        return "in --"
+    names = " ".join(B.names(inp.buttons)) or "-"
+    who = " [PC]" if driven else ""
+    return f"in L({inp.stick_x:+4d},{inp.stick_y:+4d}) C({inp.cstick_x:+4d},{inp.cstick_y:+4d}) {names}{who}"
+
+
 def stage_line(stage_id: int) -> str:
     layout = stage_layout(stage_id)
     return f"[listen] stage {stage_name(stage_id)} (id {stage_id}, layout {layout or 'other'})"
 
 
 def winner_line(final) -> str:
-    a, b = final.bot, final.opponent
+    a, b = final.by_port
     if a.stocks > b.stocks:
         result = f"P1 {kind_name(a.fighter_kind)} wins"
     elif b.stocks > a.stocks:
@@ -161,8 +171,9 @@ def listen(
         watcher.poll(now)
         if latest is not None and now - last_live >= 1.0:
             last_live = now
-            print(f"[frame {latest.frame:>6}]  {describe(1, latest.bot)}")
-            print(f"{'':16}{describe(2, latest.opponent)}")
+            p1, p2 = latest.by_port
+            print(f"[frame {latest.frame:>6}]  {describe(1, p1)}  {describe_inputs(latest.inputs[0], latest.driven[0])}")
+            print(f"{'':16}{describe(2, p2)}  {describe_inputs(latest.inputs[1], latest.driven[1])}")
             latest = None
         if now - last_report >= report_every:
             fps = frames.window_frames / (now - last_report)
@@ -181,6 +192,8 @@ def listen(
                     f"{'installed' if control.hook_installed else 'NOT installed'}, "
                     f"PC session {'on' if control.session_active else 'off'}, "
                     f"input player_idx seen {bits_list(control.idx_seen)}, "
+                    f"captured as P1/P2 player_idx {control.player_idx_by_port()}"
+                    f"{' (fim_player_idx override)' if control.fim_override else ''}, "
                     f"bot controller stick ({o.stick_x}, {o.stick_y}) buttons {o.buttons:#x}"
                 )
             if seqs.received:

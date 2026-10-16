@@ -85,7 +85,9 @@ class ScriptedRobPolicy:
     # helpers
 
     def _orient(self, f: Frame) -> tuple[Fighter, Fighter]:
-        if self.cfg.bot_port == 2:
+        # Frames decoded with a bot port (bridge.run) already have frame.bot
+        # as the bot; only swap when the frame says the bot is the other port.
+        if self.cfg.bot_port in (1, 2) and f.bot_index != self.cfg.bot_port - 1:
             return f.opponent, f.bot
         return f.bot, f.opponent
 

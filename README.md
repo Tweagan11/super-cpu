@@ -70,9 +70,12 @@ Phase 1 tools (from `bridge/`):
 | --- | --- |
 | `python -m bridge.udp_listen --log --stage fd` | also writes each match to `data/matches/` (format in `docs/logging-schema.md`) |
 | `python -m bridge.inspect_log data/matches/*.npz` | summary of logged matches |
-| `python -m bridge.eval --games 50 --model scripted` | scores N matches into `eval/results.csv` (see `eval/README.md`) |
-| `python -m bridge.fake_switch --matches 3` | fake Switch that plays 3 short matches with a winner each |
+| `python -m bridge.run --policy scripted --log --eval 50` | plays, logs every match (with both ports' inputs) and scores 50 games into `eval/results.csv`, one process |
+| `python -m bridge.eval --games 50 --model scripted` | scores N matches without playing (human or CPU sets, see `eval/README.md`) |
+| `python -m bridge.fake_switch --matches 3` | fake Switch that plays 3 short matches with a winner each, takes inputs, sends captured inputs |
 
-The scripted R.O.B. baseline (SSB-11) is `bridge/bridge/scripted.py`, selectable as `--policy scripted`. It picks the stage layout from the streamed stage id. `SCPU_STAGE=battlefield|fd|omega` is only a fallback for other stages; set `SCPU_BOT_PORT=1|2` until port mapping is streamed.
+The scripted R.O.B. baseline (SSB-11) is `bridge/bridge/scripted.py`, selectable as `--policy scripted`. It picks the stage layout from the streamed stage id. `SCPU_STAGE=battlefield|fd|omega` is only a fallback for other stages. Under `bridge.run`, `frame.bot` is already the `--bot-port` fighter, so `SCPU_BOT_PORT` isn't needed there.
+
+Human play for imitation learning (SSB-13): the plugin captures both ports' final mapped inputs every frame (protocol v3), so `python -m bridge.udp_listen --log --p1 NAME --p2 NAME` logs a human set with the input columns filled.
 
 Pin the game version and mod set in `plugin/src/version.rs` before collecting any data.

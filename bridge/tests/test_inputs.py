@@ -33,10 +33,10 @@ from bridge.wire import (
 
 # Same strings as GOLDEN_* in plugin/src/input.rs. If one side changes a
 # layout, both test suites have to change.
-GOLDEN_INPUT = "534350550200020007000000e8030000ea0300007f81050a05000000"
-GOLDEN_ACK = "534350550200040009000000e8030000ea030000e9030000"
+GOLDEN_INPUT = "534350550300020007000000e8030000ea0300007f81050a05000000"
+GOLDEN_ACK = "534350550300040009000000e8030000ea030000e9030000"
 GOLDEN_STATUS = (
-    "53435055020005000b000000" "02010700"
+    "53435055030005000b000000" "02010700"
     "e8030000" "03000000" "e2030000" "de030000"
     "01000000" "02000000" "03000000" "04000000"
     "40060000" "06000000"
@@ -72,7 +72,7 @@ class LayoutTests(unittest.TestCase):
 
     def test_status_matches_rust(self):
         s = ControlStatus(
-            Header(2, 5, 11), 2, 1, 7, fim_calls=1000, idx_seen=3, inputs_rx=994, applied=990,
+            Header(3, 5, 11), 2, 1, 7, fim_calls=1000, idx_seen=3, inputs_rx=994, applied=990,
             late=1, rejected=2, repeats=3, neutral=4, cpu_calls=1600, cpu_idx_seen=6,
             orig=Inputs(120, -120, 0, 0, 4),
         )
@@ -91,13 +91,15 @@ class LayoutTests(unittest.TestCase):
             unpack_ack(bytes.fromhex(GOLDEN_INPUT))
 
     def test_bot_port_mapping(self):
-        f = Frame(5, 0, fighter(1.0), fighter(2.0))  # bot = 1.0
+        f = Frame(5, 0, fighter(1.0), fighter(2.0), bot_index=1)  # bot = 1.0, on port 2
         # bot on port 2: on the wire port 1 is the opponent
-        buf = pack_state(0, f, bot_index=1)
+        buf = pack_state(0, f)
         _, as_p1 = unpack_state(buf)
         self.assertEqual((as_p1.bot.pos_x, as_p1.opponent.pos_x), (2.0, 1.0))
+        self.assertEqual([x.pos_x for x in as_p1.by_port], [2.0, 1.0])
         _, back = unpack_state(buf, bot_index=1)
         self.assertEqual(back, f)
+        self.assertEqual([x.pos_x for x in back.by_port], [2.0, 1.0])
 
     def test_button_bits_match_modpack(self):
         # Training Modpack src/common/input.rs, Buttons bitflags

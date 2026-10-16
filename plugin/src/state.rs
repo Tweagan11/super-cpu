@@ -16,6 +16,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use smash::app::{self, lua_bind::*, utility, BattleObjectModuleAccessor};
+
+use crate::input::{Inputs, CAPTURE};
 use smash::lib::lua_const::*;
 
 #[repr(C)]
@@ -51,6 +53,11 @@ pub struct FrameState {
     pub stage_id: i32,
     /// index 0 = port 1, index 1 = port 2 (bot/opponent mapping comes later)
     pub fighters: [FighterState; 2],
+    /// SSB-13: the final mapped inputs each port's fighter read this frame,
+    /// filled from `input::CAPTURE` when the frame is published.
+    pub inputs: [Inputs; 2],
+    /// `input::CAP_*` bits: which of `inputs` are real, and which the PC drove.
+    pub input_flags: u32,
 }
 
 /// Game-thread side of the bridge. Only touched from the frame hook.
@@ -68,7 +75,7 @@ static COLLECTOR: Mutex<Collector> = Mutex::new(Collector {
         fighter_kind: 0, pos_x: 0.0, pos_y: 0.0, vel_x: 0.0, vel_y: 0.0, damage: 0.0,
         shield_hp: 0.0, stocks: 0, status_kind: 0, motion_kind: 0, anim_frame: 0.0,
         facing: 0, jumps_left: 0, flags: 0,
-    }; 2] },
+    }; 2], inputs: [Inputs::NEUTRAL; 2], input_flags: 0 },
     last_entry: i32::MAX,
     last_seen: None,
     color_logged: [false; 2],
@@ -147,7 +154,13 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
             c.last_entry = i32::MAX;
             c.color_logged = [false; 2];
         } else if entry <= c.last_entry {
-            // wrapped around: the last frame is done
+            // wrapped around: the last frame is done. Its inputs were
+            // captured by the input hook one game frame ago (keyed by this
+            // same frame number, see input::on_final_input_mapping), so
+            // they're in the ring already. Lock-free read.
+            let (inputs, input_flags) = CAPTURE.frame(c.current.frame);
+            c.current.inputs = inputs;
+            c.current.input_flags = input_flags;
             if let Some(tx) = SENDER.get() {
                 // never block the game; if the queue is full the frame is dropped
                 if tx.try_send(c.current).is_ok() {
