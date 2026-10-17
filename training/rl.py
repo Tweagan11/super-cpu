@@ -56,6 +56,28 @@ gap lands on the next frame seen). The rewards of the last `delay` frames of a
 match are credited to the last decisions. GAE then runs over decisions as
 usual with the match end as terminal (value 0 after it).
 
+## Action repeat (`hold`, SCPU_RL_HOLD, default 2)
+
+A decision is made every `hold` frames and the sampled input is held for
+exactly `hold` frames (fixed repeat, so the decision process is well defined;
+if a frame is dropped the next decision simply happens on the next frame seen,
+at or after decision frame + hold). Between decisions act() returns the held
+Inputs and only feeds the reward tracker. Only decision frames enter the
+rollout buffer, KL penalty and entropy bonus.
+
+- Credit: decision i gets the sum of per-frame rewards over the frames its
+  action was applied: [t_i + delay + lag, t_(i+1) + delay + lag), by frame
+  number (`window_rewards`). hold=1 uses the old `delayed_rewards` (identical).
+- Discount: `gamma ** hold` per decision step (GAE `lam` is per decision
+  step). This keeps the horizon in frames (and in seconds) what `gamma` means
+  per frame, whatever the hold; using plain `gamma` per decision would stretch
+  the horizon to hold * 1/(1-gamma) frames.
+- Stage control: Phi is evaluated on decision frames only, and the shaping
+  reward gamma**hold * Phi(s_next) - Phi(s) lands on the next decision frame,
+  so it is a potential difference over the decision step (plus -Phi(last
+  decision state) at a real match end).
+- `min_decisions` counts decisions, not frames.
+
 ## Not forgetting BC
 
 - KL(pi || pi_BC) penalty per head, weight `kl_coef`, against a frozen copy of the
@@ -258,10 +280,15 @@ class RewardTracker:
       discount (RLPolicy passes cfg.gamma).
     """
 
-    def __init__(self, cfg: RewardConfig = RewardConfig(), gamma: float = 0.99, shaping_mult: float = 1.0) -> None:
+    def __init__(self, cfg: RewardConfig = RewardConfig(), gamma: float = 0.99, shaping_mult: float = 1.0,
+                 stage_inline: bool = True) -> None:
+        """stage_inline=False: `step` leaves stage control out; the caller calls
+        `stage_step` on its decision frames only (gamma is then the discount
+        per decision step, gamma_frame ** hold)."""
         self.cfg = cfg
         self.gamma = gamma
         self.mult = shaping_mult
+        self.stage_inline = stage_inline
         self.reset()
 
     def reset(self) -> None:
@@ -275,6 +302,7 @@ class RewardTracker:
             self.totals[rew] = 0.0
             self.totals[cnt] = 0
         self.phi = 0.0
+        self.stage_started = False
         self.opp_free_off = 0          # free (not in hitstun) offstage frames of the opponent's current excursion
         self.last_off_hit = NEG_INF    # frame the bot last hit the opponent while it was offstage
         self.last_guard = NEG_INF      # frame the bot last stood by the ledge, onstage, while the opponent was offstage
@@ -331,7 +359,8 @@ class RewardTracker:
             if f.bot.stocks > 0 and f.opponent.stocks > 0:
                 self.armed = True
                 self.prev = f
-                self.phi = self.potential(f)
+                if self.stage_inline:
+                    self.phi = self.potential(f)
             return 0.0
         p = self.prev
         self.prev = f
@@ -367,7 +396,7 @@ class RewardTracker:
     def finish(self) -> float:
         """Terminal potential shaping (Phi of the end state is 0): call once when
         the match is really over. Returns the reward to add to the last frame."""
-        if not self.armed:
+        if not self.armed or (not self.stage_inline and not self.stage_started):
             return 0.0
         r = self._add("stage_control", -self.phi, scaled=False)
         self.phi = 0.0
@@ -434,9 +463,22 @@ class RewardTracker:
                 self.bot_exc = 0
 
         # 5: potential-based stage control
+        if self.stage_inline:
+            r += self.stage_step(f)
+        return r
+
+    def stage_step(self, f: Frame) -> float:
+        """Stage control for one step: gamma * Phi(f) - Phi(previous step's state).
+        Called every frame by `step` (stage_inline) or on decision frames only by
+        the caller. The first call after arming only records Phi."""
+        if not self.armed:
+            return 0.0
         phi = self.potential(f)
+        if not self.stage_inline and not self.stage_started:
+            self.stage_started, self.phi = True, phi
+            return 0.0
         self._count("stage_control")
-        r += self._add("stage_control", self.gamma * phi - self.phi, scaled=False)
+        r = self._add("stage_control", self.gamma * phi - self.phi, scaled=False)
         self.phi = phi
         return r
 
@@ -484,6 +526,30 @@ def delayed_rewards(decision_frames: Sequence[int], reward_frames: Sequence[int]
     return (hi - lo).astype(np.float32)
 
 
+def window_rewards(decision_frames: Sequence[int], reward_frames: Sequence[int], rewards: Sequence[float],
+                   delay: int, lag: int = 0) -> np.ndarray:
+    """Reward credited to each decision under action repeat: the sum of the
+    per-frame rewards over the frames its action was applied, i.e. frames
+    [t_i + delay + lag, t_(i+1) + delay + lag), by frame number (so a frame the
+    stream dropped does not lose its reward). The last decision runs to the end
+    of the rewards; rewards before the first window are dropped, like in
+    `delayed_rewards`."""
+    df = np.asarray(decision_frames, np.int64)
+    rf = np.asarray(reward_frames, np.int64)
+    cum = np.concatenate([[0.0], np.cumsum(np.asarray(rewards, np.float64))])
+    if not len(df):
+        return np.zeros(0, np.float32)
+    start = cum[np.searchsorted(rf, df + delay + lag - 1, side="right")]  # reward on frames < target
+    return (np.concatenate([start[1:], cum[-1:]]) - start).astype(np.float32)
+
+
+def decision_rewards(decision_frames, reward_frames, rewards, delay: int, lag: int = 0, hold: int = 1) -> np.ndarray:
+    """hold 1: `delayed_rewards` (the original credit); else `window_rewards`."""
+    if hold <= 1:
+        return delayed_rewards(decision_frames, reward_frames, rewards, delay, lag)
+    return window_rewards(decision_frames, reward_frames, rewards, delay, lag)
+
+
 def gae(rewards: np.ndarray, values: np.ndarray, gamma: float, lam: float, last_value: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
     """(advantages, returns) for one episode. `last_value` is the bootstrap
     after the final step (0 for a match that ended)."""
@@ -496,6 +562,11 @@ def gae(rewards: np.ndarray, values: np.ndarray, gamma: float, lam: float, last_
         running = delta + gamma * lam * running
         adv[t] = running
     return adv, adv + values.astype(np.float32)
+
+
+def decision_gamma(cfg: "RLConfig") -> float:
+    """Discount per decision step: gamma ** hold (keeps the horizon in frames)."""
+    return cfg.gamma ** max(1, cfg.hold)
 
 
 @dataclass(frozen=True)
@@ -514,7 +585,8 @@ class RLConfig:
     matches_per_update: int = 2
     min_decisions: int = 120           # matches with fewer decisions are thrown away
     lr: float = 1e-4
-    gamma: float = 0.99                # per frame: horizon ~ 1.7 s
+    hold: int = 2                      # action repeat: frames per decision (env SCPU_RL_HOLD)
+    gamma: float = 0.99                # per frame: horizon ~ 1.7 s (applied as gamma ** hold per decision)
     lam: float = 0.95
     clip: float = 0.2
     epochs: int = 4
@@ -706,7 +778,7 @@ class Learner:
         t0 = time.monotonic()
         advs, rets = [], []
         for ep in episodes:
-            a, r = gae(ep.reward, ep.value, cfg.gamma, cfg.lam)
+            a, r = gae(ep.reward, ep.value, decision_gamma(cfg), cfg.lam)
             advs.append(a)
             rets.append(r)
         cont = torch.from_numpy(np.concatenate([e.cont for e in episodes])).to(dev)
@@ -790,7 +862,7 @@ class Learner:
 # ---------------------------------------------------------------------------
 # The policy
 
-MATCH_COLUMNS = ["match", "time", "version", "updates_done", "frames", "decisions", "return", "result", "win",
+MATCH_COLUMNS = ["match", "time", "version", "updates_done", "frames", "hold", "decisions", "return", "result", "win",
                  "bot_stocks", "opp_stocks", "damage_dealt", "damage_taken", "stocks_taken", "stocks_lost",
                  "self_destructs", "offstage_frames", "shaping_mult", *SHAPING_COLUMNS, "shaping_total", "mean_entropy", "mean_value", "act_ms_mean",
                  "rolling_win", "kept", "last_kl_ref", "last_update_entropy", "last_policy_loss", "last_value_loss"]
@@ -860,7 +932,7 @@ class RLPolicy:
         self._csv_path = self.out_dir / "matches.csv"
         self._active = False
         self._reset_match()
-        log(f"[rl] run {self.run}: {'learning' if learn else 'NOT learning'}, delay {self.delay}, "
+        log(f"[rl] run {self.run}: {'learning' if learn else 'NOT learning'}, delay {self.delay}, hold {cfg.hold}, "
             f"{'greedy' if cfg.greedy else f'sampling T={cfg.temperature}'}"
             + (f", logs {self.out_dir}, checkpoints {self.ckpt_dir}" if learn else ""))
 
@@ -898,7 +970,13 @@ class RLPolicy:
 
     # -- per match ----------------------------------------------------------
     def _reset_match(self) -> None:
-        self.tracker = RewardTracker(self.rcfg, self.cfg.gamma, shaping_multiplier(self.rcfg, self.matches))
+        self.tracker = RewardTracker(self.rcfg, decision_gamma(self.cfg), shaping_multiplier(self.rcfg, self.matches),
+                                     stage_inline=self.cfg.hold <= 1)
+        self._held: Inputs | None = None
+        self._next_decision = 0
+        self._rf: list[int] = []      # every frame seen, with its reward (frame-number lookup for the credit)
+        self._rr: list[float] = []
+        self._calls = 0
         self.prev: deque[Inputs] = deque(maxlen=max(1, self.fcfg.prev_inputs))
         self.last_frame: int | None = None
         self.last_obj: Frame | None = None
@@ -908,8 +986,7 @@ class RLPolicy:
         self._act: list[tuple[int, int, int]] = []
         self._logp: list[float] = []
         self._val: list[float] = []
-        self._frames: list[int] = []
-        self._rew: list[float] = []
+        self._frames: list[int] = []  # decision frames
         self._ent = 0.0
         self._t_act = 0.0
 
@@ -941,6 +1018,18 @@ class RLPolicy:
             self._begin()
         self.last_frame, self.last_obj = f.frame, f
         r = self.tracker.step(f)
+        self._calls += 1
+        held = self._held
+        if held is not None and self.cfg.hold > 1 and f.frame < self._next_decision:
+            self._rf.append(f.frame)    # held frame: reward bookkeeping only
+            self._rr.append(r)
+            self.prev.append(held)
+            self._t_act += time.perf_counter() - t0
+            return held
+        if self.cfg.hold > 1:
+            r += self.tracker.stage_step(f)  # Phi at the decision boundary
+        self._rf.append(f.frame)
+        self._rr.append(r)
         cont, cat = live_features(history, list(self.prev), self.delay, self.fcfg)
         T = self.cfg.temperature
         with torch.inference_mode():
@@ -962,7 +1051,7 @@ class RLPolicy:
         self.prev.append(inp)
         self._ent += ent
         self._frames.append(f.frame)
-        self._rew.append(r)
+        self._held, self._next_decision = inp, f.frame + self.cfg.hold
         self._val.append(float(v[0]))
         if self.learner is not None:
             self._cont.append(cont)
@@ -977,6 +1066,7 @@ class RLPolicy:
             return
         self._active = False
         n = len(self._frames)
+        calls = max(1, self._calls)
         cfg = self.cfg
         done = reason in ("state_stopped", "frame_reset") and final is not None and game_over(final)
         kept = done and n >= cfg.min_decisions
@@ -993,24 +1083,24 @@ class RLPolicy:
             res = f"incomplete:{reason}"
         win = 1.0 if res == "win" else 0.0
         if done:
-            self._rew[-1] += self.tracker.finish()   # terminal potential: Phi(end) = 0
+            self._rr[-1] += self.tracker.finish()   # terminal potential: Phi(end) = 0
         t = self.tracker.totals
         if kept:
             self.matches += 1
             self.results.append(win)
         rolling = float(np.mean(self.results)) if self.results else float("nan")
-        shaped = delayed_rewards(self._frames, self._frames, self._rew, self.delay, self.rcfg.effect_lag)
+        shaped = decision_rewards(self._frames, self._rf, self._rr, self.delay, self.rcfg.effect_lag, cfg.hold)
         ls = self.learner.last_stats if self.learner is not None else {}
         row = {
             "match": self.matches if kept else "", "time": time.strftime("%Y-%m-%d %H:%M:%S"), "version": self.version,
-            "updates_done": self.learner.updates if self.learner else 0, "frames": self._frames[-1], "decisions": n,
+            "updates_done": self.learner.updates if self.learner else 0, "frames": self._rf[-1], "hold": cfg.hold, "decisions": n,
             "return": float(shaped.sum()), "result": res, "win": win, "bot_stocks": bot_stocks, "opp_stocks": opp_stocks,
             "damage_dealt": round(t["damage_dealt"], 2), "damage_taken": round(t["damage_taken"], 2),
             "stocks_taken": t["stocks_taken"], "stocks_lost": t["stocks_lost"], "self_destructs": t["self_destructs"],
             "offstage_frames": t["offstage_frames"], "shaping_mult": round(self.tracker.mult, 4),
             **{k: (round(t[k], 4) if isinstance(t[k], float) else t[k]) for k in SHAPING_COLUMNS},
             "shaping_total": round(sum(t[r] for r, _ in SHAPING_TERMS.values()), 4), "mean_entropy": self._ent / n,
-            "mean_value": float(np.mean(self._val)), "act_ms_mean": 1e3 * self._t_act / n,
+            "mean_value": float(np.mean(self._val)), "act_ms_mean": 1e3 * self._t_act / calls,
             "rolling_win": rolling, "kept": int(kept),
             "last_kl_ref": ls.get("kl_ref", ""), "last_update_entropy": ls.get("entropy", ""),
             "last_policy_loss": ls.get("policy_loss", ""), "last_value_loss": ls.get("value_loss", ""),
@@ -1020,7 +1110,7 @@ class RLPolicy:
             self._write_row(row)
         self.log(f"[rl] match {row['match'] or '-'}: {res}, return {row['return']:.2f}, dealt {row['damage_dealt']:.0f}% "
                  f"taken {row['damage_taken']:.0f}%, {n} decisions, entropy {row['mean_entropy']:.2f}, "
-                 f"act {row['act_ms_mean']:.2f} ms, rolling win {rolling:.2f}" + ("" if kept else " (not used)"))
+                 f"act {row['act_ms_mean']:.2f} ms/frame, rolling win {rolling:.2f}" + ("" if kept else " (not used)"))
         if not kept or self.learner is None:
             return
         adv_free = Episode(
