@@ -68,8 +68,18 @@ PLAYER_DTYPE = np.dtype([
     ("cstick_y", "i1"),
     ("buttons", "<u4"),
     ("input_valid", "u1"),
+    # SSB-18 (DAgger), optional: the CPU AI's own decision on a frame the PC
+    # drove that port (drive_cpu). The played inputs stay in the columns
+    # above. expert_valid = 0 on old logs and on every undriven row.
+    ("expert_stick_x", "i1"),
+    ("expert_stick_y", "i1"),
+    ("expert_cstick_x", "i1"),
+    ("expert_cstick_y", "i1"),
+    ("expert_buttons", "<u4"),
+    ("expert_valid", "u1"),
 ])
 INPUT_FIELDS = ("stick_x", "stick_y", "cstick_x", "cstick_y", "buttons")
+EXPERT_FIELDS = tuple("expert_" + k for k in INPUT_FIELDS)
 
 STATE_FIELDS = [
     "fighter_kind", "pos_x", "pos_y", "vel_x", "vel_y", "damage", "shield_hp", "stocks",
@@ -200,6 +210,7 @@ class MatchLogger:
         self._inputs: dict[tuple[int, int], Inputs] = {}  # (port, frame) -> inputs, from acks
         self._captured: list[tuple[Inputs | None, Inputs | None]] = []  # per row, port order, from the plugin
         self._cm: list[tuple[Inputs | None, Inputs | None]] = []  # per row, ControlModule inputs (v4)
+        self._expert: list[tuple[Inputs | None, Inputs | None]] = []  # per row, CPU AI decision (CAP_BOT_EXPERT)
         self._summary: MatchSummary | None = None
         self._match_id: str | None = None
         self._started_at: datetime | None = None
@@ -232,7 +243,12 @@ class MatchLogger:
         self._seqs.append(seq)
         self._times.append(now - self._t0)
         self._captured.append(frame.inputs)
-        self._cm.append(frame.cm_inputs)
+        # With CAP_BOT_EXPERT the driven port's CM block is the AI's decision,
+        # not a read of what was played: keep it out of the CM stream (it
+        # would pollute the CPU-port fill and the fim agreement stats).
+        exp = frame.expert_inputs
+        self._expert.append(exp)
+        self._cm.append(tuple(None if exp[p] is not None else frame.cm_inputs[p] for p in range(2)))
         self._summary.add(frame)
 
     def record_inputs(self, port: int, frame: int, inputs: Inputs) -> None:
@@ -399,6 +415,16 @@ class MatchLogger:
                 players[name][fill, port] = cm_arr[name][fill, port]
             players["input_valid"][fill, port] = 1
             filled_cm[port] = int(fill.sum())
+        # 4. expert decisions (SSB-18), their own columns
+        expert_rows = [0, 0]
+        for row, pair in enumerate(self._expert):
+            for port, inp in enumerate(pair):
+                if inp is None:
+                    continue
+                for name in INPUT_FIELDS:
+                    players["expert_" + name][row, port] = getattr(inp, name)
+                players["expert_valid"][row, port] = 1
+                expert_rows[port] += 1
         sources = []
         for port in range(N_PORTS):
             used = [name for name, k in (("ack", from_acks[port]), ("fim", captured[port]),
@@ -421,6 +447,9 @@ class MatchLogger:
             # Rows where both fim and control module exist, compared after
             # encoding to training/actions.py classes. Per port.
             "control_module_agreement": agree,
+            # SSB-18. Rows where the CM block was the CPU AI's decision for
+            # the driven port (expert_valid = 1 in the players array).
+            "rows_expert": expert_rows,
         }
         return frames, players, capture
 
@@ -450,6 +479,16 @@ class LoadedMatch:
         return self.players[:, slot - 1]
 
 
+def _upgrade_players(old: np.ndarray) -> np.ndarray:
+    """Logs written before the optional columns existed: copy what is there,
+    the rest (expert_*) stays zero, so expert_valid = 0."""
+    new = np.zeros(old.shape, dtype=PLAYER_DTYPE)
+    for name in old.dtype.names or ():
+        if name in PLAYER_DTYPE.names:
+            new[name] = old[name]
+    return new
+
+
 def load_match(
     path: Path | str,
     expect_version: str | None = None,
@@ -462,6 +501,8 @@ def load_match(
     with np.load(path, allow_pickle=False) as z:
         header = json.loads(str(z["header"]))
         frames, players = z["frames"], z["players"]
+        if players.dtype != PLAYER_DTYPE:
+            players = _upgrade_players(players)
         inferred = z["inferred"] if "inferred" in z.files else None
     if header.get("schema_version") != SCHEMA_VERSION:
         raise LogRejected(f"{path}: schema v{header.get('schema_version')}, expected v{SCHEMA_VERSION}")

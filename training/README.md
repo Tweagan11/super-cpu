@@ -110,6 +110,33 @@ python -m training.train_bc data/matches --model gru     # optional GRU variant
 - Checkpoints go to `checkpoints/<timestamp>-<model>-s<seed>/{best,last}.pt`
   plus `summary.json`. `checkpoints/` and `data/` are git-ignored.
 
+## DAgger with the CPU AI as the expert (SSB-18)
+
+Plain behavior cloning drifts: the model only ever saw states a level 9 CPU
+reaches, and once the bot's own mistakes put it somewhere else it has no idea
+how to recover. DAgger fixes that by labeling the states the bot actually
+visits with what the expert would have done there. With `drive_cpu = true` the
+bot's port is a CPU card, so the level 9 AI still decides every frame; the
+plugin overwrites that decision with the bot's input but also sends the
+decision itself (`CAP_BOT_EXPERT`, `docs/protocol.md`). The logger stores it
+in the `expert_*` columns next to the inputs the bot really played
+(`docs/logging-schema.md`).
+
+The loop:
+
+1. Round 0: train on CPU vs CPU / human logs as usual (`python -m training.train_bc data/cpu`).
+2. Play N matches with the current model: `SCPU_CHECKPOINT=checkpoints/<run>/best.pt python -m bridge.run --policy bc --bot-port 2 --log` (drive_cpu on, `docs/testing-phase0.md` 14c2 to check `rows_expert`).
+3. Retrain on the original data plus those logs: `python -m training.train_bc data/cpu data/matches --dagger --bot-port 2`. Add `--expert-weight 2` to make the on-policy rows count more.
+4. Repeat from 2 with the new checkpoint. Keep every round's logs (the dataset aggregates).
+
+What `--dagger` (alias `--expert-labels`) does:
+
+- Rows with `expert_valid = 1` use the CPU AI's decision as the target. A log that has any such rows for the bot port is a bot-played match: only its expert rows are targets (its other rows are the bot imitating itself).
+- Logs without expert rows (ordinary CPU matches) keep their recorded inputs as labels.
+- Features come from the state as usual, i.e. the bot's own trajectory, which is the point. The previous-input features on those rows are what the bot actually **played** (that is what it sees live), never the expert's decision.
+- `--bot-port` must be the port of the bot in the bot-played logs (the CPU logs are read at the same port, so use logs where that port is the CPU you want to copy).
+- `--expert-weight` (default 1.0) scales the loss of expert rows. Validation is unweighted but includes expert rows, so it measures agreement with the expert on the bot's own states.
+
 ## Inverse dynamics model (SSB-26)
 
 A BC policy sees state up to frame t and guesses the input. An IDM sees state

@@ -102,7 +102,7 @@ Right after the two fighters:
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| input_flags | u32 | bit 0 port 1 captured, bit 1 port 2 captured, bit 2 port 1 driven by the PC, bit 3 port 2 driven by the PC, bit 4 port 1 control module block valid (v4), bit 5 port 2 control module block valid (v4) |
+| input_flags | u32 | bit 0 port 1 captured, bit 1 port 2 captured, bit 2 port 1 driven by the PC, bit 3 port 2 driven by the PC, bit 4 port 1 control module block valid (v4), bit 5 port 2 control module block valid (v4), bit 6 `CAP_BOT_EXPERT` (SSB-18) |
 | port 1 stick_x, stick_y, cstick_x, cstick_y | i8 | the final `MappedInputs` port 1's fighter read on this frame |
 | port 1 buttons | u32 | mapped button bits (`bridge/bridge/buttons.py`) |
 | port 2 sticks, buttons | 4 x i8, u32 | same for port 2 |
@@ -110,6 +110,8 @@ Right after the two fighters:
 | port 2 control module inputs | 4 x i8, u32 | v4, see below |
 
 36 bytes (v4; 20 in v3). A port whose bit isn't set is all zeros and means "not captured" (bridge side: `Frame.inputs[i] is None`), not neutral. "Driven" means the plugin wrote the PC's input over the controller that frame (fresh, a repeat, or neutral). For the bot's port that's exactly what was applied, so repeats and neutral frames are known too.
+
+`CAP_BOT_EXPERT` (bit 6, SSB-18, DAgger): with `drive_cpu`, the control module block of the **driven** port (the one whose driven bit is set) holds the CPU AI's own decision for that frame instead of the echo of what was written. The captured block (FIM, marked driven) still holds what was actually played. The layout is unchanged and `PROTO_VERSION` stays 4: an old bridge just sees a control module block. Frame alignment: `on_cpu_drive` files the played inputs and the AI's decision under the same frame number (`live_frame`); the fighter hook swaps the decision into the packet's CM block when it publishes that frame (`input::pack_expert`, plugin-side only). The plugin's own agreement check (capture vs the real CM read) runs on the real read before the swap and is unaffected. Frames where the PC did not write the port (no session, so the AI plays) carry no flag. Bridge side: `Frame.cm_expert` and `Frame.expert_inputs`.
 
 How it's captured (`plugin/src/input.rs`, `Capture`): the final input mapping hook already runs for every player every frame. After the original runs (and after we overwrite the bot's input, if we do), it writes the result into a small lock-free ring, keyed by the frame those inputs take effect on (`live_frame + 1`, the same target the input path uses). When the fighter hook wraps and publishes frame N, it reads frame N's entry from the ring. The ring is 4 seqlock slots per port: one writer (the input hook) and one reader (the fighter hook); a reader that lands mid-write just reports "not captured" for that frame. No locks, no allocation, no waiting. Frames with no live match (`live_frame()` None) or where `live_frame()` lost its try_lock aren't captured.
 

@@ -423,6 +423,27 @@ pub const CAP_P2_DRIVEN: u32 = 8;
 /// fighter's own ControlModule, works for CPU ports too).
 pub const CAP_P1_CM: u32 = 16;
 pub const CAP_P2_CM: u32 = 32;
+/// DAgger (SSB-18): with drive_cpu, the ControlModule block of the driven
+/// port holds the CPU AI's own decision for that frame, not the echo of what
+/// was written. The port is the one with its CAP_P*_DRIVEN bit set. Layout
+/// is unchanged; an old bridge just sees a CM block.
+pub const CAP_BOT_EXPERT: u32 = 64;
+
+/// Packet-side decision for the expert swap: replace the CM block of every
+/// port that has an expert decision for this frame and mark it. Pure so it
+/// can be tested on the host. `cm_valid` bits are set for swapped ports too.
+pub fn pack_expert(cm: [Inputs; 2], flags: u32, expert: [Option<Inputs>; 2]) -> ([Inputs; 2], u32) {
+    let mut out = cm;
+    let mut flags = flags;
+    for port in 0..2 {
+        let driven = flags & if port == 0 { CAP_P1_DRIVEN } else { CAP_P2_DRIVEN } != 0;
+        if let (Some(e), true) = (expert[port], driven) {
+            out[port] = e;
+            flags |= CAP_BOT_EXPERT | if port == 0 { CAP_P1_CM } else { CAP_P2_CM };
+        }
+    }
+    (out, flags)
+}
 
 /// Float stick (ControlModule, -1..1) to the i8 we log: x127, rounded,
 /// clamped. NaN reads as centered.
@@ -513,6 +534,10 @@ impl Capture {
         (out, flags)
     }
 }
+
+/// The CPU AI's own decision per frame for the driven port (same keying as
+/// CAPTURE: the frame the written inputs apply to).
+pub static EXPERT: Capture = Capture::new();
 
 /// Which final input mapping player_idx gets captured as port 1 and port 2.
 ///
@@ -853,6 +878,10 @@ pub fn on_cpu_drive(ai: Inputs, live_frame: Option<u32>) -> Option<Inputs> {
     let out = apply_bot(target, ai);
     let port = (bot_port() as usize).saturating_sub(1);
     CAPTURE.put(port, target, out.unwrap_or(ai), out.is_some());
+    // Only while we drive: with no PC session the AI plays, nothing to teach.
+    if out.is_some() {
+        EXPERT.put(port, target, ai, true);
+    }
     out
 }
 
@@ -884,6 +913,23 @@ mod tests {
         "40060000", "06000000",
         "78880000", "04000000",
     );
+
+    #[test]
+    fn expert_packing() {
+        let cm = [Inputs { stick_x: 1, ..Inputs::NEUTRAL }, Inputs { stick_x: 2, ..Inputs::NEUTRAL }];
+        let ai = Inputs { stick_x: 99, buttons: 1, ..Inputs::NEUTRAL };
+        let flags = CAP_P1_VALID | CAP_P2_VALID | CAP_P2_DRIVEN | CAP_P1_CM | CAP_P2_CM;
+        // no expert decision: untouched
+        assert_eq!(pack_expert(cm, flags, [None, None]), (cm, flags));
+        // driven port with an expert decision: swapped and flagged
+        let (o, f) = pack_expert(cm, flags, [None, Some(ai)]);
+        assert_eq!(o, [cm[0], ai]);
+        assert_eq!(f, flags | CAP_BOT_EXPERT);
+        // expert for a port that was not driven this frame: ignored
+        assert_eq!(pack_expert(cm, flags, [Some(ai), None]), (cm, flags));
+        // bit is free
+        assert_eq!(CAP_BOT_EXPERT & (CAP_P1_VALID | CAP_P2_VALID | CAP_P1_DRIVEN | CAP_P2_DRIVEN | CAP_P1_CM | CAP_P2_CM), 0);
+    }
 
     #[test]
     fn sizes() {

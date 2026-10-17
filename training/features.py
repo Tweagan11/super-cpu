@@ -74,7 +74,7 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
-from bridge.logger import PLAYER_DTYPE, STATE_FIELDS, LoadedMatch, load_match
+from bridge.logger import EXPERT_FIELDS, PLAYER_DTYPE, STATE_FIELDS, LoadedMatch, load_match
 from bridge.matches import fighters
 from bridge.protocol import Frame, Inputs
 from bridge.stages import LAYOUT_BATTLEFIELD, LAYOUT_FD, LAYOUTS, stage_layout
@@ -339,6 +339,25 @@ class BCDataset:
     match_ids: list[str]
     labels: np.ndarray      # (N, 3) action classes at each row, -1 where input_valid = 0
     label_row: np.ndarray   # (N, max_delay + 1)
+    # DAgger (SSB-18). `labels` is always what the bot actually played (it
+    # feeds the prev-input features: that is what it sees live). `targets`,
+    # when set, is what the model is trained to output: the CPU AI's decision
+    # on expert rows, -1 on rows of an expert-bearing log that have none,
+    # `labels` elsewhere. `expert_row` marks the rows whose target is an
+    # expert decision.
+    targets: np.ndarray | None = None
+    expert_row: np.ndarray | None = None
+
+    @property
+    def target_labels(self) -> np.ndarray:
+        return self.labels if self.targets is None else self.targets
+
+    def sample_weights(self, rows: np.ndarray, delays: np.ndarray, expert_weight: float) -> np.ndarray:
+        """Loss weight per sample: `expert_weight` where the target is an expert decision, else 1."""
+        w = np.ones(len(rows), np.float32)
+        if self.expert_row is not None and expert_weight != 1.0:
+            w[self.expert_row[self.label_row[np.asarray(rows), np.asarray(delays)]]] = expert_weight
+        return w
 
     @property
     def n_rows(self) -> int:
@@ -390,7 +409,7 @@ class BCDataset:
         cont, cat = window_features(
             self.keys, self.starts, self.stage_ids, self.players, rows, delays, prev, self.cfg,
         )
-        tgt = self.labels[self.label_row[rows, delays]]
+        tgt = self.target_labels[self.label_row[rows, delays]]
         return cont, cat, tgt
 
     def prev_inputs_for(self, row: int, delay: int) -> list[Inputs | None]:
@@ -469,14 +488,22 @@ def build_dataset(
     expect_version: str | None = EXPECT_VERSION,
     expect_mod_hash: str | None = None,
     include_inferred: bool = False,
+    expert_labels: bool = False,
 ) -> BCDataset:
     """Load matches (paths are loaded with expect_version, so wrong builds are
     rejected with LogRejected) and index them for training. Rows whose inputs
-    were predicted by an IDM (idm.py label) are left out unless include_inferred."""
+    were predicted by an IDM (idm.py label) are left out unless include_inferred.
+
+    `expert_labels` (DAgger, SSB-18): on rows with expert_valid = 1 the
+    training target is the CPU AI's decision instead of the played input. A
+    log that has any such rows for the bot port is a bot-played match: there
+    only the expert rows are targets (its other rows are the bot imitating
+    itself), but its played inputs still feed the prev-input features."""
     loaded = load_all(matches, expect_version, expect_mod_hash, include_inferred)
     # (load_all ordered matches by content, not file name: ids carry a random
     # suffix and split_by_match splits by position.)
     keys, starts, sids, pls, midx, labels, ids = [], [], [], [], [], [], []
+    targets, experts = [], []
     offset = 0
     for i, m in enumerate(loaded):
         n = len(m.frames)
@@ -492,22 +519,32 @@ def build_dataset(
         lab = np.stack(A.encode_arrays(p["stick_x"], p["stick_y"], p["cstick_x"], p["cstick_y"], p["buttons"]), axis=1)
         lab[~valid_input_mask(m, cfg.bot_port, include_inferred)] = -1
         labels.append(lab)
+        tgt = lab.copy()
+        exp = np.zeros(n, bool)
+        if expert_labels and (p["expert_valid"] == 1).any():
+            exp = p["expert_valid"] == 1
+            tgt[:] = -1
+            tgt[exp] = np.stack(A.encode_arrays(*(p[k] for k in EXPERT_FIELDS)), axis=1)[exp]
+        targets.append(tgt)
+        experts.append(exp)
         ids.append(m.header.get("match_id", str(i)))
         offset += n
     keys = np.concatenate(keys)
     labels = np.concatenate(labels)
+    targets = np.concatenate(targets)
     starts = np.concatenate(starts)
     N = len(keys)
     label_row = np.full((N, max_delay + 1), -1, np.int64)
     for d in range(max_delay + 1):
         want = keys + d
         pos = np.minimum(np.searchsorted(keys, want), N - 1)
-        ok = (keys[pos] == want) & (labels[pos, 0] >= 0)
+        ok = (keys[pos] == want) & (targets[pos, 0] >= 0)
         label_row[ok, d] = pos[ok]
     return BCDataset(
         cfg=cfg, max_delay=max_delay, keys=keys, starts=starts,
         stage_ids=np.concatenate(sids), players=np.concatenate(pls),
         match_index=np.concatenate(midx), match_ids=ids, labels=labels, label_row=label_row,
+        targets=targets if expert_labels else None, expert_row=np.concatenate(experts) if expert_labels else None,
     )
 
 
