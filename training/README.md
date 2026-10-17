@@ -201,6 +201,18 @@ the short version:
 - Delay: the decision on frame t applies on t + delay, so its reward is the
   one seen on that later frame (`effect_lag` shifts it further). GAE runs
   over decisions with the match end as terminal.
+- Action repeat: `SCPU_RL_HOLD` (default 2) frames per decision, a fixed
+  repeat like `SCPU_HOLD` in `bc_policy`, so the bot does not twitch on
+  hardware. Held frames return the same input and only feed the reward
+  tracker; only decision frames go to the rollout buffer, the KL penalty and
+  the entropy bonus. A decision's reward is the sum of per-frame rewards over
+  the frames its action was applied (`t + delay` up to the next decision's
+  `t + delay`, exclusive, by frame number, so dropped frames lose nothing).
+  Discount is `gamma ** hold` per decision (`gamma` keeps meaning per frame, so
+  the horizon in seconds does not change with the hold; GAE `lam` is per
+  decision). Stage control is a potential difference between decision frames.
+  `min_decisions` counts decisions. `matches.csv` has `hold` and `decisions`.
+  `SCPU_RL_HOLD=1` is the old per-frame behaviour.
 - KL(pi || pi_BC) penalty (`kl_coef`), entropy bonus (`ent_coef`), value head
   trained alone for the first 2 updates, PPO clipping and a target_kl stop.
 - Output: `data/rl/<run>/matches.csv` (return, win/loss, damage, stocks,

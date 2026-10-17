@@ -453,6 +453,7 @@ class PolicyTests(unittest.TestCase):
     def make(self, name, reward=None, **kw):
         from training.rl import RewardConfig, RLConfig, RLPolicy
         kw.setdefault("async_learn", False)
+        kw.setdefault("hold", 1)          # the original per-frame behaviour; action repeat has its own tests
         kw.setdefault("matches_per_update", 1)
         kw.setdefault("epochs", 2)
         kw.setdefault("minibatch", 256)
@@ -608,6 +609,209 @@ class PolicyTests(unittest.TestCase):
         self.play(p)
         self.assertFalse((p.out_dir / "matches.csv").exists())
 
+@SKIP
+class ActionRepeatCreditTests(unittest.TestCase):
+    def brute(self, dec, frames, rew, delay, lag=0):
+        """Per decision: sum of rewards over [t_i+delay+lag, t_next+delay+lag)."""
+        out = []
+        for i, t in enumerate(dec):
+            lo = t + delay + lag
+            hi = dec[i + 1] + delay + lag if i + 1 < len(dec) else 10 ** 9
+            out.append(sum(r for f, r in zip(frames, rew) if lo <= f < hi))
+        return out
+
+    def test_reward_is_the_sum_over_the_applied_window(self):
+        from training.rl import window_rewards
+        frames = list(range(14))
+        rew = [0.1 * (i + 1) for i in range(14)]
+        dec = [0, 2, 4, 6, 8, 10, 12]
+        for delay, lag in ((0, 0), (3, 0), (2, 1)):
+            got = window_rewards(dec, frames, rew, delay, lag)
+            np.testing.assert_allclose(got, self.brute(dec, frames, rew, delay, lag), atol=1e-6)
+        # delay 3: decision at 0 is applied on frames 3,4 -> rewards[3] + rewards[4]
+        self.assertAlmostEqual(float(window_rewards(dec, frames, rew, 3)[0]), 0.4 + 0.5, places=6)
+
+    def test_a_dropped_frame_keeps_its_reward_in_the_right_window(self):
+        from training.rl import window_rewards
+        frames = [0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11]   # 5 never arrived; frame 6 carries its reward
+        rew = [0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 0]
+        dec = [0, 2, 4, 6, 8, 10]
+        got = window_rewards(dec, frames, rew, delay=1)
+        np.testing.assert_allclose(got, self.brute(dec, frames, rew, 1), atol=1e-6)
+        self.assertAlmostEqual(float(got.sum()), 1.0)
+        self.assertEqual(int(np.flatnonzero(got)[0]), 2)   # applied window [5, 7) holds frame 6
+        # a dropped *decision* frame: decisions at 0, 3 (frame 2 was lost), the window just gets longer
+        got = window_rewards([0, 3], list(range(8)), [1.0] * 8, delay=0)
+        np.testing.assert_allclose(got, [3.0, 5.0])
+
+    def test_hold_one_is_the_original_credit(self):
+        from training.rl import decision_rewards, delayed_rewards
+        frames = [0, 1, 2, 5, 6, 7, 8]
+        rew = [0, 0.5, 0, 1.0, 0, 2.0, 0]
+        np.testing.assert_array_equal(decision_rewards(frames, frames, rew, 2, 0, hold=1),
+                                      delayed_rewards(frames, frames, rew, 2, 0))
+
+    def test_gae_over_decisions_discounts_per_decision_step(self):
+        from training.rl import RLConfig, decision_gamma, gae
+        cfg = RLConfig(hold=3, gamma=0.9)
+        g = decision_gamma(cfg)
+        self.assertAlmostEqual(g, 0.9 ** 3)
+        self.assertEqual(decision_gamma(RLConfig(hold=1, gamma=0.9)), 0.9)
+        r = np.zeros(6, np.float32)
+        r[4] = 1.0
+        adv, _ = gae(r, np.zeros(6, np.float32), g, lam=1.0)
+        np.testing.assert_allclose(adv[:5], [g ** (4 - i) for i in range(5)], atol=1e-6)
+        self.assertEqual(float(adv[5]), 0.0)
+        # one decision step earlier is `hold` frames earlier: three frames of discount
+        self.assertAlmostEqual(float(adv[3]) / float(adv[4]), 0.9 ** 3, places=6)
+
+
+@SKIP
+class ActionRepeatShapingTests(unittest.TestCase):
+    def tracker(self, gamma, inline, mult=1.0):
+        from training.rl import RewardConfig, RewardTracker
+        cfg = RewardConfig(**dict(NO_SHAPING, damage_dealt=0.0, damage_taken=0.0, stock_taken=0.0, stock_lost=0.0,
+                                  self_destruct=0.0, offstage_penalty=0.0, stage_control_weight=0.5))
+        return RewardTracker(cfg, gamma=gamma, shaping_mult=mult, stage_inline=inline)
+
+    def frames(self, n=41):
+        rng = np.random.default_rng(5)
+        return [fr(0)] + [fr(i, bot=fighter(pos_x=float(rng.uniform(-120, 120))),
+                             opp=fighter(pos_x=float(rng.uniform(-120, 120)))) for i in range(1, n)]
+
+    def test_potential_telescopes_over_decision_steps(self):
+        hold, gframe = 4, 0.97
+        gd = gframe ** hold
+        t = self.tracker(gd, inline=False, mult=0.5)
+        frames = self.frames()
+        out = []
+        for f in frames:
+            self.assertEqual(t.step(f), 0.0)            # stage control is not paid per frame
+            if f.frame % hold == 0:
+                out.append(t.stage_step(f))
+        dec = [f for f in frames if f.frame % hold == 0]
+        phi0, phiT = t.potential(dec[0]), t.potential(dec[-1])
+        T = len(dec) - 1
+        disc = sum(gd ** (i - 1) * r for i, r in enumerate(out) if i >= 1)
+        self.assertAlmostEqual(disc, gd ** T * phiT - phi0, places=9)
+        fin = t.finish()
+        self.assertAlmostEqual(disc + gd ** T * fin, -phi0, places=9)
+        self.assertAlmostEqual(t.totals["stage_control_reward"], sum(out) + fin)
+
+    def test_every_frame_stage_step_equals_the_inline_tracker(self):
+        frames = self.frames()
+        a, b = self.tracker(0.9, True), self.tracker(0.9, False)
+        for f in frames:
+            self.assertAlmostEqual(a.step(f), b.step(f) + b.stage_step(f), places=12)
+        self.assertAlmostEqual(a.finish(), b.finish(), places=12)
+
+
+@SKIP
+class ActionRepeatPolicyTests(unittest.TestCase):
+    setUpClass = classmethod(PolicyTests.setUpClass.__func__)
+    tearDownClass = classmethod(PolicyTests.tearDownClass.__func__)
+    make = PolicyTests.make
+    play = PolicyTests.play
+
+    def frames(self, n=240, winner=1):
+        from bridge.fake_switch import scripted_match
+        return scripted_match(n, winner, winner_losses=0, stocks=1)
+
+    def drive(self, p, frames):
+        from bridge.matches import MatchEnded, MatchStarted
+        from bridge.policy import History
+        eps = []
+        p.learner.submit = lambda kind, payload: eps.append(payload) if kind == "episode" else None
+        h = History()
+        p.on_match_start(MatchStarted(frames[0], 0.0))
+        for f in frames:
+            p.act(h.push(f))
+        p.on_match_end(MatchEnded(frames[-1], "state_stopped", 1.0))
+        return eps
+
+    def test_held_frames_return_the_same_inputs_and_record_nothing(self):
+        from bridge.policy import History
+        p = self.make("h1", hold=3)
+        h = History()
+        outs, sizes = [], []
+        for f in self.frames(30):
+            outs.append(p.act(h.push(f)))
+            sizes.append((len(p._cont), len(p._cat), len(p._act), len(p._logp), len(p._val), len(p._frames)))
+        for i in range(30):
+            self.assertIs(outs[i], outs[i - i % 3])          # the decision's Inputs object, held
+            self.assertEqual(sizes[i], (i // 3 + 1,) * 6)    # nothing added between decisions
+        self.assertEqual(p._frames, list(range(0, 30, 3)))
+        self.assertEqual(len(p._rf), 30)                     # but every frame's reward is tracked
+
+    def test_dropped_frames_delay_the_next_decision(self):
+        from bridge.policy import History
+        p = self.make("h2", hold=2)
+        h = History()
+        for f in self.frames(20):
+            if f.frame not in (2, 3):                        # the decision due on 2 happens on 4
+                p.act(h.push(f))
+        self.assertEqual(p._frames[:4], [0, 4, 6, 8])
+
+    def test_hold_one_decides_every_frame_like_before(self):
+        from bridge.policy import History
+        p = self.make("h3", hold=1)
+        h = History()
+        for f in self.frames(20):
+            p.act(h.push(f))
+        self.assertEqual(p._frames, list(range(20)))
+
+    def test_episode_credit_matches_the_window_sum(self):
+        from training.rl import delayed_rewards, window_rewards
+        for hold in (1, 2, 3):
+            p = self.make(f"c{hold}", hold=hold)
+            ep = self.drive(p, self.frames())[0]
+            self.assertEqual(len(ep), len(p._frames))
+            self.assertEqual(len(ep.cont), len(ep.logp))
+            if hold == 1:
+                want = delayed_rewards(p._frames, p._rf, p._rr, p.delay, 0)
+            else:
+                want = window_rewards(p._frames, p._rf, p._rr, p.delay, 0)
+                self.assertEqual(p._frames, list(range(0, 240, hold)))
+            np.testing.assert_allclose(ep.reward, want, atol=1e-6)
+            self.assertAlmostEqual(float(ep.reward.sum()), float(p.stats[-1]["return"]), places=4)
+            # nothing is lost beyond the lead-in before the first applied frame
+            self.assertAlmostEqual(float(ep.reward.sum()), float(sum(p._rr[p.delay:])), places=3)
+            self.assertEqual(p.stats[-1]["hold"], hold)
+            self.assertEqual(p.stats[-1]["decisions"], len(p._frames))
+
+    def test_update_runs_with_hold_two(self):
+        p = self.make("u2", hold=2)
+        self.play(p)
+        self.assertEqual(p.learner.updates, 1)
+        self.assertEqual(p.stats[0]["decisions"], 120)
+        self.assertIsNone(p.learner.error)
+
+    def test_stored_logprobs_match_the_update_with_hold(self):
+        from bridge.policy import History
+        from training.rl import _head_logp_ent_kl
+        p = self.make("lp", hold=2)
+        h = History()
+        for f in self.frames(60):
+            p.act(h.push(f))
+        self.assertEqual(len(p._cont), 30)
+        with torch.no_grad():
+            logits, v = p.model(torch.from_numpy(np.stack(p._cont)), torch.from_numpy(np.stack(p._cat)))
+        logp, _, _ = _head_logp_ent_kl(logits, None, torch.tensor(p._act), 1.0)
+        np.testing.assert_allclose(logp.numpy(), p._logp, atol=1e-4)
+
+    def test_held_frames_are_cheap(self):
+        from bridge.policy import History
+        p = self.make("cheap", hold=4)
+        h = History()
+        hist = [h.push(f) for f in self.frames(240)]
+        held = []
+        for i, hs in enumerate(hist):
+            t0 = time.perf_counter()
+            p.act(hs)
+            if i % 4:
+                held.append(time.perf_counter() - t0)
+        self.assertLess(1e3 * float(np.median(held)), 0.5)   # tracker step only; the decision frame runs the net
+
 
 @SKIP
 class EndToEndTests(unittest.TestCase):
@@ -624,7 +828,7 @@ class EndToEndTests(unittest.TestCase):
             env = {"SCPU_CHECKPOINT": str(tmp / "bc.pt"), "SCPU_RL_RUN": "e2e", "SCPU_RL_OUT_DIR": str(tmp / "data"),
                    "SCPU_RL_CKPT_DIR": str(tmp / "ck"), "SCPU_RL_MATCHES_PER_UPDATE": "1", "SCPU_RL_EPOCHS": "2",
                    "SCPU_RL_VALUE_WARMUP_UPDATES": "0", "SCPU_RL_LR": "0.001", "SCPU_RL_MIN_DECISIONS": "30",
-                   "SCPU_RL_CKPT_EVERY": "1"}
+                   "SCPU_RL_CKPT_EVERY": "1", "SCPU_RL_HOLD": "2"}
             old = {k: os.environ.get(k) for k in env}
             os.environ.update(env)
             try:
@@ -648,6 +852,7 @@ class EndToEndTests(unittest.TestCase):
             logs = []
             b = Bridge(port, policy, delay=2, bot_port=2, bind="127.0.0.1", log=logs.append, auto_rematch=True)
             b.rematch.settle = 0.2
+            self.assertEqual(policy.cfg.hold, 2)
             self.assertEqual(policy.delay, 2)               # configure(): the bridge's delay wins
             self.assertEqual(policy.fcfg.bot_port, 2)
             t = threading.Thread(target=fake, daemon=True)
@@ -671,6 +876,9 @@ class EndToEndTests(unittest.TestCase):
             self.assertFalse(torch.equal(w0, w1), "weights changed")
             rows = read_csv(tmp / "data" / "matches.csv")
             self.assertEqual(len(rows), matches)
+            self.assertEqual({r["hold"] for r in rows}, {"2"})
+            for r in rows:   # a decision every 2 frames
+                self.assertAlmostEqual(int(r["decisions"]), (int(r["frames"]) + 1) / 2, delta=3)
             self.assertEqual(len(read_csv(tmp / "data" / "updates.csv")), matches)
             self.assertTrue((tmp / "ck" / "last.pt").exists())
 
