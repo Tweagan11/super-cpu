@@ -80,21 +80,21 @@ class TrainTests(unittest.TestCase):
         self.assertEqual(greedy, run("0"))
         self.assertNotEqual(greedy, sampled)
 
-    def test_sticky_sampling_changes_less(self):
-        """Sticky (default) vs plain sampling on the same frames: holding
-        a still-plausible class means fewer changes frame to frame."""
+    def test_hold_changes_less_but_still_acts(self):
+        """Hold (default 4) vs per-frame sampling: fewer changes frame to
+        frame, but it still changes (a stuck bot is the hardware bug)."""
         from bridge.policy import POLICIES, History
         from training.synthetic import synthetic_frames
         import random
         s = self._train("st", epochs=2)
         frames = synthetic_frames(200, random.Random(2), 0)
 
-        def changes(sticky):
-            os.environ.update(SCPU_CHECKPOINT=s["best"], SCPU_SEED="5", SCPU_STICKY=sticky)
+        def changes(hold):
+            os.environ.update(SCPU_CHECKPOINT=s["best"], SCPU_SEED="5", SCPU_HOLD=hold)
             try:
                 q = POLICIES["bc"]()
             finally:
-                for k in ("SCPU_CHECKPOINT", "SCPU_SEED", "SCPU_STICKY"):
+                for k in ("SCPU_CHECKPOINT", "SCPU_SEED", "SCPU_HOLD"):
                     del os.environ[k]
             hh = History()
             outs = []
@@ -103,7 +103,9 @@ class TrainTests(unittest.TestCase):
                 outs.append(q.last_classes)
             return sum(a != b for a, b in zip(outs, outs[1:]))
 
-        self.assertLess(changes("0.25"), changes("0"))
+        held, every = changes("4"), changes("1")
+        self.assertLess(held, every)
+        self.assertGreater(held, 200 // 4 // 4, "still picks new inputs")
 
     def test_bc_needs_checkpoint(self):
         from training.bc_policy import BCPolicy

@@ -21,11 +21,19 @@ Config (env vars, since `--policy bc` builds it with no args; keyword args win):
 - SCPU_TEMPERATURE: sampling temperature, default 1.0 (sample from the
   model's own probabilities). Lower is greedier and steadier, 0 is argmax.
 - SCPU_SEED: seed for sampling (default: random).
-- SCPU_STICKY: keep each head's previous class while the model still gives it
-  at least this probability (default 0.25; 0 turns it off). Without it,
-  independent per-frame sampling flips between near-tied classes every frame
-  (hardware 2026-10-16: nothing, jump, right, jump, nothing, left on
-  consecutive frames), so the bot twitches instead of holding an input.
+- SCPU_HOLD: frames to commit to each sampled input before sampling again
+  (default 2, 1 = every frame). Replaying a logged CPU match offline through
+  the 130-match model, hold 2 changed input 0.08 per frame and attacked 1.6%
+  of frames, vs the CPU's 0.12 and 1.8%; every frame was 0.19 (twitchy),
+  hold 4 was 0.05. Independent per-frame sampling flips between
+  near-tied classes every frame (hardware 2026-10-16: nothing, jump, right,
+  jump, nothing, left on consecutive frames). The CPU it copies changes its
+  input about every 8 frames. A held input is dropped early if the model
+  gives it under 5%, so it can still react.
+- SCPU_STICKY: keep the previous class while its probability stays at least
+  this (default 0: off). Don't use it with a large value: "no button" is
+  above 25% on most frames, so the bot gets stuck doing nothing (seen on
+  hardware with 0.25).
 """
 from __future__ import annotations
 
@@ -68,7 +76,10 @@ class BCPolicy:
         t = os.environ.get("SCPU_TEMPERATURE")
         self.temperature = float(t) if t else 1.0
         st = os.environ.get("SCPU_STICKY")
-        self.sticky = float(st) if st else 0.25
+        self.sticky = float(st) if st else 0.0
+        hd = os.environ.get("SCPU_HOLD")
+        self.hold = max(1, int(hd)) if hd else 2
+        self.held_for = 0
         seed = os.environ.get("SCPU_SEED")
         self.gen = torch.Generator(device="cpu")
         if seed:
@@ -90,6 +101,7 @@ class BCPolicy:
         self.prev: deque[Inputs] = deque(maxlen=max(1, self.cfg.prev_inputs))
         self.last_frame: int | None = None
         self.last_classes: tuple[int, int, int] | None = None
+        self.held_for = 0
 
     @torch.inference_mode()
     def predict(self, history: Sequence[Frame]) -> tuple[int, int, int]:
@@ -97,15 +109,18 @@ class BCPolicy:
         out = self.model(torch.from_numpy(cont[None]).to(self.device), torch.from_numpy(cat[None]).to(self.device))
         if self.temperature <= 0:
             return tuple(int(out[h][0].argmax()) for h in HEADS)
-        picks = []
-        for i, h in enumerate(HEADS):
-            p = torch.softmax(out[h][0].float().cpu() / self.temperature, dim=-1)
-            prev = self.last_classes[i] if self.last_classes is not None else None
-            if prev is not None and self.sticky > 0 and float(p[prev]) >= self.sticky:
-                picks.append(prev)  # still plausible: keep holding it
-            else:
-                picks.append(int(torch.multinomial(p, 1, generator=self.gen)))
-        return tuple(picks)
+        probs = [torch.softmax(out[h][0].float().cpu() / self.temperature, dim=-1) for h in HEADS]
+        prev = self.last_classes
+        if prev is not None:
+            still_ok = all(float(p[c]) >= 0.05 for p, c in zip(probs, prev))
+            if self.held_for < self.hold and still_ok:
+                self.held_for += 1
+                return prev  # committed: keep holding
+            if self.sticky > 0 and all(float(p[c]) >= self.sticky for p, c in zip(probs, prev)):
+                self.held_for = 1
+                return prev
+        self.held_for = 1
+        return tuple(int(torch.multinomial(p, 1, generator=self.gen)) for p in probs)
 
     def act(self, history: Sequence[Frame]) -> Inputs:
         if not history:

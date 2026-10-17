@@ -168,7 +168,8 @@ through `bridge.run` with 0 late inputs at `--delay 2`.
   checkpoint's `--max-delay`.
 - `SCPU_BOT_PORT`: override the port the checkpoint was trained for.
 - `SCPU_TEMPERATURE`: the bot samples its inputs from the model's probabilities (default 1.0). Lower is steadier, `0` is always the single most likely input, which makes the bot nearly passive: "no button, stick centered" wins most frames.
-- `SCPU_STICKY`: keep the previous input while the model still gives it at least this probability (default 0.25, `0` off). Stops frame-to-frame flipping between near-tied choices.
+- `SCPU_HOLD`: frames to commit to each sampled input (default 2, `1` = new pick every frame). Matches the CPU's input rhythm best; every frame twitches.
+- `SCPU_STICKY`: keep the previous input while its probability stays above this (default `0`, off). Large values freeze the bot on "no button".
 - `SCPU_DEVICE`: `cpu` (default) or `cuda`. One `act()` (features + forward
   + decode) takes about 0.6 ms on one CPU thread, and the forward pass alone
   about 0.12 ms. The GRU variant's forward pass is about 0.85 ms on CPU.
