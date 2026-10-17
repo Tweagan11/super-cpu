@@ -120,7 +120,8 @@ unsafe fn set_cpu_controls(p_data: *mut *mut u8) {
 /// drive_cpu, game thread. Is this call the bot's CPU, and if so write the
 /// PC's inputs for the frame the next fighter update reads.
 fn drive(module: &mut ControlModuleInternal, idx: i32) {
-    // Same frame number as the FIM hook; None outside a match.
+    // None outside a match. (The written inputs are filed under `live`
+    // itself, see input::on_cpu_drive; `target` here only drives the tracker.)
     let Some(live) = crate::state::live_frame() else { return };
     let target = live.wrapping_add(1);
     let ovr = CPU_OVERRIDE.load(Ordering::Relaxed);

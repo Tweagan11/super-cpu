@@ -844,7 +844,12 @@ fn apply_bot(target: u32, orig: Inputs) -> Option<Inputs> {
 /// Returns the inputs to write into the CPU's controls, or None to leave the
 /// AI's decision. Records the result in the capture ring either way.
 pub fn on_cpu_drive(ai: Inputs, live_frame: Option<u32>) -> Option<Inputs> {
-    let target = live_frame?.wrapping_add(1);
+    // Unlike the FIM hook, the CPU hook runs inside the fighter update for
+    // the frame live_frame() already names, so what we write here is read
+    // on that frame, not the next. Hardware (2026-10-16): with +1, the
+    // control module on frame N read what was filed for N+1 every time, and
+    // inputs counted as late a frame too soon (~20% late at delay 3).
+    let target = live_frame?;
     let out = apply_bot(target, ai);
     let port = (bot_port() as usize).saturating_sub(1);
     CAPTURE.put(port, target, out.unwrap_or(ai), out.is_some());
