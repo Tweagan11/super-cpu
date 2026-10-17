@@ -29,6 +29,10 @@ CAP_P1_DRIVEN = 4
 CAP_P2_DRIVEN = 8
 CAP_P1_CM = 16  # v4: the ControlModule block for port 1 is valid
 CAP_P2_CM = 32
+# SSB-18 (DAgger): with drive_cpu, the CM block of the driven port (the one
+# with its DRIVEN bit set) is the CPU AI's own decision for that frame, not
+# what was played. No layout change, so old bridges just see a CM block.
+CAP_BOT_EXPERT = 64
 
 # The input packet layout lives in wire.py (pack_input), next to the header.
 
@@ -89,6 +93,17 @@ class Frame:
     # v4: what each port's fighter read from its ControlModule this frame, port
     # order, None = not read. Present for CPU ports, which have no FIM capture.
     cm_inputs: tuple[Inputs | None, Inputs | None] = (None, None)
+    # CAP_BOT_EXPERT: the CM block of each DRIVEN port holds the CPU AI's
+    # decision. Set on the frame as a whole; `expert_inputs` applies it per port.
+    cm_expert: bool = False
+
+    @property
+    def expert_inputs(self) -> tuple[Inputs | None, Inputs | None]:
+        """The CPU AI's decision per port (port order), None where this frame
+        doesn't carry one: needs CAP_BOT_EXPERT, a driven port and its CM block."""
+        if not self.cm_expert:
+            return (None, None)
+        return tuple(self.cm_inputs[p] if self.driven[p] else None for p in range(2))  # type: ignore[return-value]
 
     @property
     def by_port(self) -> tuple[Fighter, Fighter]:
@@ -123,7 +138,8 @@ def decode_frame(buf: bytes, offset: int = 0, bot_index: int = 0) -> Frame:
         Inputs(*v[16:21]) if flags & CAP_P2_CM else None,
     )
     bot, opp = (p2, p1) if bot_index == 1 else (p1, p2)
-    return Frame(frame, stage_id, bot, opp, 1 if bot_index == 1 else 0, inputs, driven, cm)
+    return Frame(frame, stage_id, bot, opp, 1 if bot_index == 1 else 0, inputs, driven, cm,
+                 bool(flags & CAP_BOT_EXPERT))
 
 
 def capture_flags(f: Frame) -> int:
@@ -140,6 +156,8 @@ def capture_flags(f: Frame) -> int:
         flags |= CAP_P1_CM
     if f.cm_inputs[1] is not None:
         flags |= CAP_P2_CM
+    if f.cm_expert:
+        flags |= CAP_BOT_EXPERT
     return flags
 
 

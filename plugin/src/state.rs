@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use smash::app::{self, lua_bind::*, utility, BattleObjectModuleAccessor};
 
-use crate::input::{cm_buttons, stick_to_i8, Inputs, CAPTURE, CAP_P1_CM, CAP_P2_CM, PAD_BUTTONS};
+use crate::input::{cm_buttons, stick_to_i8, Inputs, CAPTURE, EXPERT, pack_expert, CAP_P1_CM, CAP_P2_CM, PAD_BUTTONS};
 use smash::lib::lua_const::*;
 
 #[repr(C)]
@@ -185,9 +185,18 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
             let (inputs, input_flags) = CAPTURE.frame(c.current.frame);
             c.current.inputs = inputs;
             c.current.input_flags = input_flags | c.current.cm_valid;
+            // DAgger: the driven port's CM block carries the CPU AI's
+            // decision instead of the echo. Only in the copy we send; the
+            // agreement check already ran on the real read.
+            let frame = c.current.frame;
+            let expert = [EXPERT.get(0, frame).map(|e| e.0), EXPERT.get(1, frame).map(|e| e.0)];
+            let (cm, flags) = pack_expert(c.current.cm_inputs, c.current.input_flags, expert);
+            let mut out = c.current;
+            out.cm_inputs = cm;
+            out.input_flags = flags;
             if let Some(tx) = SENDER.get() {
                 // never block the game; if the queue is full the frame is dropped
-                if tx.try_send(c.current).is_ok() {
+                if tx.try_send(out).is_ok() {
                     FRAMES_QUEUED.fetch_add(1, Ordering::Relaxed);
                 }
             }

@@ -169,9 +169,12 @@ def _to(device, *arrs):
     return [torch.from_numpy(a).to(device) for a in arrs]
 
 
-def loss_and_correct(model: BCNet, cont, cat, tgt) -> tuple[torch.Tensor, dict[str, int]]:
+def loss_and_correct(model: BCNet, cont, cat, tgt, weight=None) -> tuple[torch.Tensor, dict[str, int]]:
     out = model(cont, cat)
-    loss = sum(F.cross_entropy(out[h], tgt[:, i]) for i, h in enumerate(HEADS))
+    if weight is None:
+        loss = sum(F.cross_entropy(out[h], tgt[:, i]) for i, h in enumerate(HEADS))
+    else:  # per-sample weights (DAgger expert rows), averaged over the batch
+        loss = sum((F.cross_entropy(out[h], tgt[:, i], reduction="none") * weight).mean() for i, h in enumerate(HEADS))
     correct = {h: int((out[h].argmax(1) == tgt[:, i]).sum()) for i, h in enumerate(HEADS)}
     all_ok = torch.stack([out[h].argmax(1) == tgt[:, i] for i, h in enumerate(HEADS)]).all(0)
     correct["all"] = int(all_ok.sum())
@@ -196,8 +199,8 @@ def evaluate(model: BCNet, ds: BCDataset, rows: np.ndarray, delays: np.ndarray, 
 
 def majority_baseline(ds: BCDataset, rows: np.ndarray, delays: np.ndarray, train_rows: np.ndarray, train_delays: np.ndarray) -> dict[str, float]:
     """Val accuracy of always predicting the most common training class, per head."""
-    tr = ds.labels[ds.label_row[train_rows, train_delays]]
-    va = ds.labels[ds.label_row[rows, delays]]
+    tr = ds.target_labels[ds.label_row[train_rows, train_delays]]
+    va = ds.target_labels[ds.label_row[rows, delays]]
     return {f"acc_{h}": float((va[:, i] == np.bincount(tr[:, i]).argmax()).mean()) for i, h in enumerate(HEADS)}
 
 
@@ -252,13 +255,16 @@ def train(
     max_seconds: float | None = None,
     prev_dropout: float = 0.5,
     include_inferred: bool = False,
+    dagger: bool = False,
+    expert_weight: float = 1.0,
     log=print,
 ) -> dict[str, Any]:
     """Train and checkpoint. Returns a summary dict (val metrics, paths, ...)."""
     set_seed(seed)
     if device == "cuda" and not torch.cuda.is_available():
         raise SystemExit("--device cuda but torch.cuda.is_available() is False")
-    ds = dataset or build_dataset(files, fcfg, max_delay, expect_version, expect_mod_hash, include_inferred)
+    ds = dataset or build_dataset(files, fcfg, max_delay, expect_version, expect_mod_hash, include_inferred,
+                                  expert_labels=dagger)
     fcfg, max_delay = ds.cfg, ds.max_delay
     tr_m, va_m = split_by_match(len(ds.match_ids), val_frac, seed)
     tr_rows, va_rows = ds.sample_rows(tr_m), ds.sample_rows(va_m)
@@ -269,6 +275,8 @@ def train(
     log(f"[bc] {len(ds.match_ids)} matches ({len(tr_m)} train / {len(va_m)} val), "
         f"{len(tr_rows)} train samples, {len(va_rows)} val samples, delay 0..{max_delay}")
 
+    if dagger:
+        log(f"[bc] dagger: {int(ds.expert_row.sum()) if ds.expert_row is not None else 0} expert rows, weight {expert_weight}")
     model = BCNet(fcfg, mcfg).to(device)
     log(f"[bc] {mcfg.kind}: {n_params(model):,} params, {fcfg.n_cont} floats + {fcfg.n_cat} categoricals in")
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -288,7 +296,10 @@ def train(
         tl, tn = 0.0, 0
         for s in range(0, len(order), batch):
             cont, cat, tgt = _to(device, *ds.batch(order[s:s + batch], delays[s:s + batch], prev_dropout, rng))
-            loss, _ = loss_and_correct(model, cont, cat, tgt)
+            wt = None
+            if dagger and expert_weight != 1.0:
+                wt = _to(device, ds.sample_weights(order[s:s + batch], delays[s:s + batch], expert_weight))[0]
+            loss, _ = loss_and_correct(model, cont, cat, tgt, wt)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -340,6 +351,10 @@ def main() -> None:
                     help="chance per sample of hiding the bot's own past inputs (fights copycat feedback)")
     ap.add_argument("--include-inferred", action="store_true",
                     help="also train on input rows predicted by an IDM (python -m training.idm label); default: recorded inputs only")
+    ap.add_argument("--dagger", "--expert-labels", dest="dagger", action="store_true",
+                    help="DAgger: on rows with expert_valid = 1 (bot-played matches logged with drive_cpu) "
+                         "train on the CPU AI's decision instead of the played input; other logs as usual")
+    ap.add_argument("--expert-weight", type=float, default=1.0, help="with --dagger: loss weight of expert rows")
     args = ap.parse_args()
     files = find_matches(args.data)
     if not files:
@@ -350,7 +365,7 @@ def main() -> None:
               lr=args.lr, val_frac=args.val_frac, seed=args.seed, device=args.device, out_dir=args.out,
               expect_version=args.expect_version, expect_mod_hash=args.expect_mod_hash,
               max_seconds=args.max_seconds, prev_dropout=args.prev_dropout,
-              include_inferred=args.include_inferred)
+              include_inferred=args.include_inferred, dagger=args.dagger, expert_weight=args.expert_weight)
     print(f"[bc] best checkpoint: {s['best']}")
 
 

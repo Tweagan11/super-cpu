@@ -372,9 +372,23 @@ Goal: the bot is a CPU card, so unattended rematches work (CPU cards keep their 
 
 `python -m bridge.run --policy walk --bot-port 2 --auto-rematch --min-seconds 5` and walk away for a few matches (with `--log --eval 3` if you want files). Expect the next match to start with no human input, P2 still green R.O.B., and the `P2 is controller_index` line again each match (same N). A stuck CSS means the CPU card did not keep Random: report what the card shows.
 
+### 14c2. Expert decisions for DAgger (SSB-18)
+
+Same setup as 14a. Play one match with a trained model: `python -m bridge.run --policy bc --bot-port 2 --log` (`SCPU_CHECKPOINT=...`), let it run a minute or so, then `python -m bridge.inspect_log data/matches/<newest>.npz`. Expect on the bot's port line `rows_expert N` with N close to the match's frame count (a few frames short at the start before the first input arrives), and a control module agreement of 0 rows for that port. Then check the columns are non-trivial and differ from what was played:
+
+```
+python -c "
+import numpy as np; from bridge.logger import load_match
+p = load_match('data/matches/<newest>.npz').port(2); v = p['expert_valid'] == 1
+print(v.sum(), 'expert rows;', len(set(p['expert_stick_x'][v].tolist())), 'distinct expert stick_x;',
+      (p['expert_stick_x'][v] != p['stick_x'][v]).mean().round(2), 'of rows differ from played')"
+```
+
+Expect many distinct values (a CPU walks, jumps and attacks) and a clearly non-zero differing share (a poor bot disagrees with level 9 often; 0.0 would mean the plugin sent the echo, not the decision). Rows where the AI's decision was neutral and the bot played neutral are fine. If `rows_expert` is 0, the flag never arrived: check the `.nro` is the build with `CAP_BOT_EXPERT`.
+
 ### 14d. Off by default
 
-Remove `drive_cpu` (or set it false), reboot: the bot is driven through the controller as before and no `drive_cpu` lines appear.
+Remove `drive_cpu` (or set it false), reboot: the bot is driven through the controller as before and no `drive_cpu` lines appear, and logs have `rows_expert` 0.
 
 ## If nothing shows up
 

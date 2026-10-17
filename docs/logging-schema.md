@@ -75,6 +75,11 @@ Each `ports` entry: `slot` (1 or 2), `fighter_kind`, `fighter_name`, `controller
 | stick_x, stick_y, cstick_x, cstick_y | i8 | inputs that frame |
 | buttons | u32 | `bridge/buttons.py` bits |
 | input_valid | u8 | 1 if this row's inputs were recorded, 0 if zero-filled |
+| expert_stick_x, expert_stick_y, expert_cstick_x, expert_cstick_y | i8 | SSB-18 (DAgger), optional: the CPU AI's own decision on a frame the PC drove this port with `drive_cpu`. The played inputs stay in the columns above |
+| expert_buttons | u32 | same, `bridge/buttons.py` bits |
+| expert_valid | u8 | 1 if the `expert_*` columns on this row are the CPU AI's decision (the plugin set `CAP_BOT_EXPERT`), else 0 and zero-filled |
+
+The `expert_*` columns were added without a schema bump: `load_match` fills them with zeros (so `expert_valid = 0`) for logs written without them. The logger keeps expert rows out of the control module stream, so they never fill `input_valid` or enter `control_module_agreement`.
 
 Inputs (SSB-13): each row's input columns are the final mapped inputs that port's fighter read **on that frame**, with `input_valid = 1`. Rows with `input_valid = 0` are zero-filled and mean "unknown", not "neutral". Three sources, in this order (a later one only fills rows the earlier ones left invalid):
 
@@ -100,6 +105,7 @@ So with a v4 plugin both ports are filled almost every frame, human, bot or CPU,
 | `port_sources` | per port, which source(s) filled the rows: `fim`, `ack`, `control_module`, joined with `+` when several (`ack+fim` for the bot), `none` if the port has no inputs. A CPU port in a CPU vs CPU match is `control_module` |
 | `rows_control_module` | rows per port where the plugin sent a control module read (v4) |
 | `rows_from_control_module` | rows per port whose `input_valid` exists only because of it (no ack, no capture) |
+| `rows_expert` | SSB-18. Per port, rows with `expert_valid = 1`. About the bot port's frame count for a match played with `drive_cpu`, 0 otherwise. `inspect_log` prints it |
 | `control_module_agreement` | per port, rows where both the FIM capture and the control module exist, compared after encoding each to `training/actions.py` classes: `rows_compared`, `main`, `cstick`, `buttons` (rows in the same class on that head), `all` (all three heads agree) and `all_pct`. null values mean `training` couldn't be imported; `all_pct` is null when nothing was compared. CPU ports always have `rows_compared` 0. For a human port `all_pct` near 100 means the translation is right; a low `buttons` number points at a wrong button mapping, a low `main`/`cstick` at stick scaling or a swapped axis |
 
 `frame_at()` rebuilds `Frame.inputs` from valid rows (None elsewhere).

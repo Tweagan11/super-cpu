@@ -28,6 +28,8 @@ def input_line(h: dict, slot: int) -> str:
     if "rows_control_module" in cap:
         out += (f", control module rows {cap['rows_control_module'][i]} "
                 f"(filled {cap['rows_from_control_module'][i]})")
+    if "rows_expert" in cap:
+        out += f", rows_expert {cap['rows_expert'][i]}"
     ag = cap.get("control_module_agreement", [{}, {}])[i] if "control_module_agreement" in cap else {}
     if ag.get("rows_compared"):
         out += f", fim agreement {ag['all_pct']}% of {ag['rows_compared']} rows"

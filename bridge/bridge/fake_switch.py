@@ -265,7 +265,7 @@ class FakeInputSide:
 def run(host: str, port: int, drop: float, version: str, match: bool, seconds: float | None,
         bot_port: int = 2, latency_ms: float = 0.0, input_drop: float = 0.0, quiet: bool = False,
         matches: int | None = None, match_seconds: float = 6.0, gap: float = 2.5,
-        winners: tuple[int, ...] = (2, 2, 1), cpu_ports: tuple[int, ...] = (),
+        winners: tuple[int, ...] = (2, 2, 1), cpu_ports: tuple[int, ...] = (), expert: bool = False,
         menus: bool = False, menu_ignore: int = 0) -> FakeInputSide:
     """`matches=N` plays N scripted matches (stock losses, a winner, gaps for
     the results screen) back to back, then stops; otherwise one endless
@@ -450,9 +450,17 @@ def run(host: str, port: int, drop: float, version: str, match: bool, seconds: f
                     driven[bot_port - 1] = True
                 # v4: every fighter's ControlModule read; a CPU port has no capture
                 cm = (human[0], human[1])
+                if expert and driven[bot_port - 1]:
+                    # drive_cpu DAgger: the bot's CM block is the CPU AI's
+                    # decision, which differs from what was played (shifted
+                    # phase of the same plausible controller, so it is
+                    # non-trivial and disagrees most of the time)
+                    exp = human_inputs(frame + 31, bot_port * 2 - 3)
+                    cm = tuple(exp if i == bot_port - 1 else human[i] for i in range(2))
                 fim = tuple(None if (i + 1) in cpu_ports and not driven[i] else human[i] for i in range(2))
                 pending_state = Frame(frame, STAGE_ID_BATTLEFIELD, p1, p2,
-                                      inputs=fim, driven=(driven[0], driven[1]), cm_inputs=cm)
+                                      inputs=fim, driven=(driven[0], driven[1]), cm_inputs=cm,
+                                      cm_expert=expert and driven[bot_port - 1])
                 if ack is not None:
                     send(pack_ack(seq, *ack))
                 frame += 1
@@ -546,13 +554,15 @@ def main() -> None:
                     help="wait for menu presses between matches (A on results, + on the CSS), for bridge.run --auto-rematch")
     ap.add_argument("--menu-ignore", type=int, default=0, help="with --menus: the results screen ignores this many A presses")
     ap.add_argument("--winners", default="2,2,1", help="winning port per match, cycled, e.g. 2,2,1")
+    ap.add_argument("--expert", action="store_true",
+                    help="mimic drive_cpu DAgger: the driven port's CM block is a CPU AI decision that differs from the played input (CAP_BOT_EXPERT)")
     ap.add_argument("--cpu-ports", default="", help="ports played by CPUs, e.g. 1,2: control module inputs only")
     args = ap.parse_args()
     winners = tuple(int(w) for w in args.winners.split(","))
     cpu_ports = tuple(int(w) for w in args.cpu_ports.split(",") if w)
     run(args.host, args.port, args.drop, args.version, not args.no_match, args.seconds,
         args.bot_port, args.latency_ms, args.input_drop, matches=args.matches,
-        match_seconds=args.match_seconds, gap=args.gap, winners=winners, cpu_ports=cpu_ports,
+        match_seconds=args.match_seconds, gap=args.gap, winners=winners, cpu_ports=cpu_ports, expert=args.expert,
         menus=args.menus, menu_ignore=args.menu_ignore)
 
 
