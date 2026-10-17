@@ -21,6 +21,11 @@ Config (env vars, since `--policy bc` builds it with no args; keyword args win):
 - SCPU_TEMPERATURE: sampling temperature, default 1.0 (sample from the
   model's own probabilities). Lower is greedier and steadier, 0 is argmax.
 - SCPU_SEED: seed for sampling (default: random).
+- SCPU_STICKY: keep each head's previous class while the model still gives it
+  at least this probability (default 0.25; 0 turns it off). Without it,
+  independent per-frame sampling flips between near-tied classes every frame
+  (hardware 2026-10-16: nothing, jump, right, jump, nothing, left on
+  consecutive frames), so the bot twitches instead of holding an input.
 """
 from __future__ import annotations
 
@@ -62,6 +67,8 @@ class BCPolicy:
         self._delay_from_env = delay is not None or bool(env_delay)
         t = os.environ.get("SCPU_TEMPERATURE")
         self.temperature = float(t) if t else 1.0
+        st = os.environ.get("SCPU_STICKY")
+        self.sticky = float(st) if st else 0.25
         seed = os.environ.get("SCPU_SEED")
         self.gen = torch.Generator(device="cpu")
         if seed:
@@ -91,9 +98,13 @@ class BCPolicy:
         if self.temperature <= 0:
             return tuple(int(out[h][0].argmax()) for h in HEADS)
         picks = []
-        for h in HEADS:
+        for i, h in enumerate(HEADS):
             p = torch.softmax(out[h][0].float().cpu() / self.temperature, dim=-1)
-            picks.append(int(torch.multinomial(p, 1, generator=self.gen)))
+            prev = self.last_classes[i] if self.last_classes is not None else None
+            if prev is not None and self.sticky > 0 and float(p[prev]) >= self.sticky:
+                picks.append(prev)  # still plausible: keep holding it
+            else:
+                picks.append(int(torch.multinomial(p, 1, generator=self.gen)))
         return tuple(picks)
 
     def act(self, history: Sequence[Frame]) -> Inputs:

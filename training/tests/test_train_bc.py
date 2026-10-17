@@ -80,6 +80,31 @@ class TrainTests(unittest.TestCase):
         self.assertEqual(greedy, run("0"))
         self.assertNotEqual(greedy, sampled)
 
+    def test_sticky_sampling_changes_less(self):
+        """Sticky (default) vs plain sampling on the same frames: holding
+        a still-plausible class means fewer changes frame to frame."""
+        from bridge.policy import POLICIES, History
+        from training.synthetic import synthetic_frames
+        import random
+        s = self._train("st", epochs=2)
+        frames = synthetic_frames(200, random.Random(2), 0)
+
+        def changes(sticky):
+            os.environ.update(SCPU_CHECKPOINT=s["best"], SCPU_SEED="5", SCPU_STICKY=sticky)
+            try:
+                q = POLICIES["bc"]()
+            finally:
+                for k in ("SCPU_CHECKPOINT", "SCPU_SEED", "SCPU_STICKY"):
+                    del os.environ[k]
+            hh = History()
+            outs = []
+            for f in frames:
+                q.act(hh.push(f))
+                outs.append(q.last_classes)
+            return sum(a != b for a, b in zip(outs, outs[1:]))
+
+        self.assertLess(changes("0.25"), changes("0"))
+
     def test_bc_needs_checkpoint(self):
         from training.bc_policy import BCPolicy
         os.environ.pop("SCPU_CHECKPOINT", None)
