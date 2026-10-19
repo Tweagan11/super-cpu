@@ -110,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("data", nargs="+", help="match dirs or .npz files")
     ap.add_argument("--bot-port", type=int, default=2, choices=(1, 2))
+    ap.add_argument("--bad-damage", action="store_true",
+                    help="only list matches whose damage readings look broken (flicker or impossible jumps), with fighters")
     args = ap.parse_args(argv)
     paths = find_matches(args.data)
     if not paths:
@@ -130,6 +132,16 @@ def main(argv: list[str] | None = None) -> int:
             skipped += 1
             continue
         h = m.header
+        if args.bad_damage:
+            ports = h.get("ports", [])
+            for slot in (1, 2):
+                peak, drops = peak_damage(m.port(slot))
+                logged = float(ports[slot - 1].get("damage_taken", 0.0)) if len(ports) >= slot else 0.0
+                if drops > 10 or logged > peak + 50:
+                    names = [q.get("fighter_name", "?") for q in ports]
+                    print(f"{path.name}: P{slot} {names[slot - 1] if len(names) >= slot else '?'} logged {logged:.0f}% "
+                          f"vs peak-based {peak:.0f}%, {drops} drops without a KO  (fighters {names})")
+            continue
         ports = h.get("ports", [])
         ctrl = ports[bot - 1].get("controller", "?") if len(ports) >= bot else "?"
         p = m.port(bot)

@@ -11,6 +11,7 @@ from bridge.matches import (
     MatchSummary,
     MatchWatcher,
     VersionGate,
+    DamageCounter,
 )
 from bridge.wire import pack_heartbeat, pack_state
 
@@ -143,6 +144,29 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(s.stocks_lost, [1, 0])
         self.assertEqual(s.winner_port, 2)
         self.assertEqual(s.frame_count, 5)
+
+
+    def test_flicker_and_garbage_damage_not_counted(self):
+        s = MatchSummary(frame(0))
+        seq = [0, 20, 0, 20, 0, 25, 5000, 25, 30, -1, 30]
+        for i, d in enumerate(seq):
+            s.add(frame(i, fighter(damage=d), fighter(damage=0)))
+        self.assertEqual(s.damage_taken[0], 30.0)
+
+
+class DamageCounterTests(unittest.TestCase):
+    def test_counter(self):
+        c = DamageCounter()
+        self.assertEqual(c.update(0, False), 0.0)
+        self.assertEqual(c.update(12, False), 12.0)
+        self.assertEqual(c.update(0, False), 0.0)    # flicker down
+        self.assertEqual(c.update(12, False), 0.0)   # back up: already counted
+        self.assertEqual(c.update(500, False), 0.0)  # impossible jump
+        self.assertEqual(c.update(15, False), 3.0)
+        self.assertEqual(c.update(0, True), 0.0)     # new stock
+        self.assertEqual(c.update(9, False), 9.0)
+        self.assertEqual(c.total, 24.0)
+        self.assertEqual(c.rejected, 1)
 
 
 class VersionGateTests(unittest.TestCase):

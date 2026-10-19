@@ -121,7 +121,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from bridge.matches import game_over, winner_port
+from bridge.matches import DamageCounter, game_over, winner_port
 from bridge.protocol import Fighter, Frame, Inputs
 from bridge.statuses import STATUS_NAMES
 
@@ -296,6 +296,8 @@ class RewardTracker:
         self.prev: Frame | None = None
         self.since_damage = 10 ** 9   # frames since the bot last took damage
         self.offstage_run = 0
+        self.opp_damage = DamageCounter()
+        self.bot_damage = DamageCounter()
         self.totals = dict(damage_dealt=0.0, damage_taken=0.0, stocks_taken=0, stocks_lost=0,
                            self_destructs=0, offstage_frames=0)
         for rew, cnt in SHAPING_TERMS.values():
@@ -359,20 +361,23 @@ class RewardTracker:
             if f.bot.stocks > 0 and f.opponent.stocks > 0:
                 self.armed = True
                 self.prev = f
+                self.opp_damage.update(f.opponent.damage, False)
+                self.bot_damage.update(f.bot.damage, False)
                 if self.stage_inline:
                     self.phi = self.potential(f)
             return 0.0
         p = self.prev
         self.prev = f
         r = 0.0
-        dealt = max(0.0, f.opponent.damage - p.opponent.damage)
-        taken = max(0.0, f.bot.damage - p.bot.damage)
+        ko_opp = p.opponent.stocks > 0 and 0 <= f.opponent.stocks < p.opponent.stocks
+        ko_bot = p.bot.stocks > 0 and 0 <= f.bot.stocks < p.bot.stocks
+        # DamageCounter: flicker and impossible readings don't pay (see bridge.matches)
+        dealt = self.opp_damage.update(f.opponent.damage, ko_opp)
+        taken = self.bot_damage.update(f.bot.damage, ko_bot)
         r += c.damage_dealt * dealt - c.damage_taken * taken
         t["damage_dealt"] += dealt
         t["damage_taken"] += taken
         self.since_damage = 0 if taken > 0 else self.since_damage + 1
-        ko_opp = p.opponent.stocks > 0 and 0 <= f.opponent.stocks < p.opponent.stocks
-        ko_bot = p.bot.stocks > 0 and 0 <= f.bot.stocks < p.bot.stocks
         if ko_opp:
             n = p.opponent.stocks - f.opponent.stocks
             r += c.stock_taken * n

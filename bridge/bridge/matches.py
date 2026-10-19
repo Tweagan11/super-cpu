@@ -153,6 +153,46 @@ def winner_port(final: Frame) -> int | None:
     return 1 if a.stocks > b.stocks else 2
 
 
+# A single frame can't add more than this much damage (big hits are ~40-60%).
+MAX_DAMAGE_STEP = 80.0
+MAX_DAMAGE = 999.0
+
+
+class DamageCounter:
+    """Damage one fighter took, robust to bad readings.
+
+    Counts only damage above the highest percent already seen on the current
+    stock, so a reading that flickers down and back up isn't counted twice,
+    and ignores readings that jump more than MAX_DAMAGE_STEP in one frame or
+    leave 0..999 (RL run 2026-10-19: four matches logged 3,000 to 46,000%
+    "dealt" from flickering readings, and the reward paid for it)."""
+
+    def __init__(self) -> None:
+        self.peak: float | None = None
+        self.total = 0.0
+        self.rejected = 0
+
+    def update(self, damage: float, stock_lost: bool) -> float:
+        """Feed this frame's reading; returns the damage it adds."""
+        if stock_lost:
+            self.peak = None  # new stock: damage starts over
+        if not (0.0 <= damage <= MAX_DAMAGE):
+            self.rejected += 1
+            return 0.0
+        if self.peak is None:
+            self.peak = damage
+            return 0.0
+        inc = damage - self.peak
+        if inc <= 0:
+            return 0.0
+        if inc > MAX_DAMAGE_STEP:
+            self.rejected += 1
+            return 0.0
+        self.peak = damage
+        self.total += inc
+        return inc
+
+
 @dataclass
 class MatchSummary:
     """Running totals for one match, cheap enough to keep for every frame."""
@@ -164,6 +204,7 @@ class MatchSummary:
     damage_taken: list[float] = field(default_factory=lambda: [0.0, 0.0])
     stocks_lost: list[int] = field(default_factory=lambda: [0, 0])
     _prev: Frame | None = None
+    _damage: list[DamageCounter] = field(default_factory=lambda: [DamageCounter(), DamageCounter()])
 
     def __post_init__(self) -> None:
         self.start_stocks = [f.stocks for f in fighters(self.first)]
@@ -177,11 +218,15 @@ class MatchSummary:
             self.start_stocks[i] = max(self.start_stocks[i], f.stocks)
         if self._prev is not None:
             for i, (old, new) in enumerate(zip(fighters(self._prev), fighters(frame))):
-                # Damage resets to 0 on a stock loss, so only count increases.
-                if new.damage > old.damage:
-                    self.damage_taken[i] += new.damage - old.damage
-                if old.stocks > 0 and new.stocks >= 0 and new.stocks < old.stocks:
+                lost = old.stocks > 0 and new.stocks >= 0 and new.stocks < old.stocks
+                if lost:
                     self.stocks_lost[i] += old.stocks - new.stocks
+                # Damage resets to 0 on a stock loss; DamageCounter also
+                # ignores flickering and impossible readings.
+                self.damage_taken[i] += self._damage[i].update(new.damage, lost)
+        else:
+            for i, f in enumerate(fighters(frame)):
+                self._damage[i].update(f.damage, False)
         self._prev = frame
         self.final = frame
 

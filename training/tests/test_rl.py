@@ -1,4 +1,5 @@
 """RL fine-tuning tests (SSB-21). Skipped when torch isn't installed."""
+import dataclasses
 import csv
 import os
 import socket
@@ -345,7 +346,10 @@ class ShapingTests(unittest.TestCase):
     def test_per_match_caps(self):
         t = self.only(dict(spike_bonus=1.5), spike_cap=2.0)
         for k in range(3):
-            run(t, renumber(self.spike_seq(), 100 * k))
+            # each hit adds to the damage so far (damage never drops without a KO)
+            seq = [Frame(f.frame, f.stage_id, f.bot, dataclasses.replace(f.opponent, damage=f.opponent.damage + 15.0 * k))
+                   for f in self.spike_seq()]
+            run(t, renumber(seq, 100 * k))
         self.assertAlmostEqual(t.totals["spike_reward"], 2.0)
         self.assertEqual(t.totals["spikes"], 3)
         t = self.only(dict(last_jump_penalty=0.3), last_jump_cap=0.5)
