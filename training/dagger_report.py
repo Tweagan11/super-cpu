@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     streams = {k: Stream() for k in ("cpu", "expert", "played")}
     agree = np.zeros(4, np.int64)  # main, cstick, buttons, all
     agree_n = 0
-    results: dict[str, list[tuple[bool, float, int]]] = defaultdict(list)
+    results: dict[str, list[tuple[bool, float, int, float]]] = defaultdict(list)
     skipped = 0
 
     for path in paths:
@@ -127,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         if exp.any():
             if len(ports) >= opp and h.get("complete"):
                 o = ports[opp - 1]
-                results[ctrl].append((h.get("winner_port") == bot, float(o.get("damage_taken", 0.0)), int(o.get("stocks_lost", 0))))
+                results[ctrl].append((h.get("winner_port") == bot, float(o.get("damage_taken", 0.0)), int(o.get("stocks_lost", 0)), float(h.get("duration_s") or 0.0)))
             streams["expert"].add(*classes(p, EXPERT_FIELDS, exp), offstage[exp], toward[exp])
             pl = exp & (p["input_valid"] == 1)
             streams["played"].add(*classes(p, INPUT_FIELDS, pl), offstage[pl], toward[pl])
@@ -152,7 +152,10 @@ def main(argv: list[str] | None = None) -> int:
         wins = sum(r[0] for r in rows)
         dmg = np.mean([r[1] for r in rows])
         stocks = np.mean([r[2] for r in rows])
-        print(f"  {ctrl:28s} {n:3d} matches  wins {wins}/{n}  damage dealt {dmg:5.1f}%  stocks taken {stocks:.2f}")
+        secs = np.mean([r[3] for r in rows])
+        per_min = sum(r[1] for r in rows) / max(1e-9, sum(r[3] for r in rows) / 60)
+        print(f"  {ctrl:28s} {n:3d} matches  wins {wins}/{n}  damage dealt {dmg:5.1f}%  stocks taken {stocks:.2f}"
+              f"  match {secs:5.0f}s  damage/min {per_min:5.1f}%")
 
     print("\nLabel check (bot port, split as cpu playing itself / expert labels / bot's own inputs):")
     for k in ("cpu", "expert", "played"):
