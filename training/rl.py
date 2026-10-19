@@ -696,6 +696,10 @@ class Learner:
         self.opt = torch.optim.Adam(self.model.parameters(), lr=cfg.lr)
         if opt_state is not None:
             self.opt.load_state_dict(opt_state)
+            # load_state_dict brings back the saved lr too; the config's wins,
+            # so SCPU_RL_LR works on a resumed run
+            for g in self.opt.param_groups:
+                g["lr"] = cfg.lr
         self.rng = np.random.default_rng(cfg.seed + 17)
         self.ckpt_extra = ckpt_extra
         self.ckpt_dir = ckpt_dir
