@@ -157,6 +157,15 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
         if !(0..2).contains(&entry) {
             return;
         }
+        // Ice Climbers: Nana is a second fighter with Popo's entry id. Taking
+        // her too made every frame look like a wrap-around (entry 0 after 0),
+        // so frames were published twice and the port's state flickered
+        // between the two (hardware 2026-10-19: Popo matches logged up to
+        // 46,000% damage dealt). Popo is the port. HDR skips her the same way
+        // (knockback.rs, `kind() == *FIGHTER_KIND_NANA`).
+        if utility::get_kind(acc) == *FIGHTER_KIND_NANA {
+            return;
+        }
         let fighter = read_fighter(acc, entry);
         let cm = read_control_inputs(acc);
         // The results screen keeps fighters alive in DEMO (victory/clap

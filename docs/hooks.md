@@ -158,3 +158,16 @@ Risks, in the order I'd expect them to bite:
 
 - **drive_cpu works in versus**: with port 2 a level 9 CPU card and `drive_cpu = true`, `bridge.run --policy walk` took over the CPU and made it walk. `set_cpu_controls` is called outside training mode.
 - **force_fighter works**: Random on a CPU card becomes green R.O.B. (c05); a fixed pick is left alone. The decided-fighter record matches the research layout: the main ui_chara hash is word 3 (low 40 bits, e.g. `0x0e18857219` robot), word 2 holds another hash (`0x0fd5f7fa78`, unchanged), costume is the byte at `+0x20`. The record is written twice per match start ("pre" then "post"): Random re-rolls in between (seen `0x0d61668319 c06`) and the post write puts R.O.B. c05 back. A record already holding R.O.B. c05 is left as is ("already forced").
+
+## Ice Climbers (2026-10-19)
+
+Nana is a second fighter object with Popo's entry id. The state collector
+treated her as the next frame starting (entry 0 after entry 0), so with
+Ice Climbers on either port every game frame was published twice and the
+port's state alternated between Popo and Nana. Found from an RL run where
+four Popo matches logged 3,000 to 46,000% damage dealt with 1,500 to 4,100
+damage drops and no KO. `state::on_fighter_frame` now skips
+`FIGHTER_KIND_NANA`, so the port is Popo. Logs from before the fix with
+Ice Climbers in them have doubled frame counts and mixed states: drop them
+from training (`python -m training.dagger_report <dirs> --bad-damage` lists
+them).
