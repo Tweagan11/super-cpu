@@ -85,6 +85,22 @@ class Stream:
         return lines
 
 
+def peak_damage(p) -> tuple[float, int]:
+    """Damage dealt counted a second way: the highest percent the opponent
+    reached on each stock, summed. Unlike the logger's running total of
+    frame-to-frame increases, a damage reading that flickers down and back up
+    can't inflate this. Also returns how many frames damage went down without
+    a stock being lost (should be ~0; lots of them means flicker)."""
+    d = p["damage"].astype(np.float64)
+    st = p["stocks"].astype(np.int64)
+    lost = np.zeros(len(d), bool)
+    lost[1:] = (st[:-1] > 0) & (st[1:] < st[:-1])
+    seg = np.cumsum(lost)
+    total = sum(float(d[seg == k].max()) for k in np.unique(seg)) if len(d) else 0.0
+    drops = int(((d[1:] < d[:-1] - 0.01) & ~lost[1:]).sum())
+    return total, drops
+
+
 def classes(p, fields, mask):
     m, c, b = A.encode_arrays(*(p[k][mask] for k in fields))
     return np.asarray(m), np.asarray(c), np.asarray(b)
@@ -103,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     streams = {k: Stream() for k in ("cpu", "expert", "played")}
     agree = np.zeros(4, np.int64)  # main, cstick, buttons, all
     agree_n = 0
-    results: dict[str, list[tuple[bool, float, int, float]]] = defaultdict(list)
+    results: dict[str, list[tuple[bool, float, int, float, float, int]]] = defaultdict(list)
     skipped = 0
 
     for path in paths:
@@ -127,7 +143,9 @@ def main(argv: list[str] | None = None) -> int:
         if exp.any():
             if len(ports) >= opp and h.get("complete"):
                 o = ports[opp - 1]
-                results[ctrl].append((h.get("winner_port") == bot, float(o.get("damage_taken", 0.0)), int(o.get("stocks_lost", 0)), float(h.get("duration_s") or 0.0)))
+                peak, drops = peak_damage(m.port(opp))
+                results[ctrl].append((h.get("winner_port") == bot, float(o.get("damage_taken", 0.0)), int(o.get("stocks_lost", 0)),
+                                      float(h.get("duration_s") or 0.0), peak, drops))
             streams["expert"].add(*classes(p, EXPERT_FIELDS, exp), offstage[exp], toward[exp])
             pl = exp & (p["input_valid"] == 1)
             streams["played"].add(*classes(p, INPUT_FIELDS, pl), offstage[pl], toward[pl])
@@ -153,9 +171,14 @@ def main(argv: list[str] | None = None) -> int:
         dmg = np.mean([r[1] for r in rows])
         stocks = np.mean([r[2] for r in rows])
         secs = np.mean([r[3] for r in rows])
-        per_min = sum(r[1] for r in rows) / max(1e-9, sum(r[3] for r in rows) / 60)
-        print(f"  {ctrl:28s} {n:3d} matches  wins {wins}/{n}  damage dealt {dmg:5.1f}%  stocks taken {stocks:.2f}"
-              f"  match {secs:5.0f}s  damage/min {per_min:5.1f}%")
+        mins = max(1e-9, sum(r[3] for r in rows) / 60)
+        per_min = sum(r[1] for r in rows) / mins
+        peak = np.mean([r[4] for r in rows])
+        peak_min = sum(r[4] for r in rows) / mins
+        drops = np.mean([r[5] for r in rows])
+        print(f"  {ctrl:28s} {n:3d} matches  wins {wins}/{n}  stocks taken {stocks:.2f}  match {secs:4.0f}s")
+        print(f"  {'':28s} damage dealt: logged {dmg:5.1f}% ({per_min:5.1f}/min)  peak-based {peak:5.1f}% ({peak_min:5.1f}/min)"
+              f"  damage drops without a KO {drops:.1f}/match")
 
     print("\nLabel check (bot port, split as cpu playing itself / expert labels / bot's own inputs):")
     for k in ("cpu", "expert", "played"):
