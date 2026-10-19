@@ -174,6 +174,8 @@ def main(argv: list[str] | None = None) -> int:
             streams["cpu"].add(*classes(p, INPUT_FIELDS, ok), offstage[ok], toward[ok])
 
     print(f"{len(paths) - skipped} matches read" + (f", {skipped} skipped" if skipped else ""))
+    if args.bad_damage:
+        return 0
     print("\nResults by model (bot-played matches):")
     if not results:
         print("  none (no matches with expert rows)")
