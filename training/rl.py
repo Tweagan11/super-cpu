@@ -121,7 +121,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from bridge.matches import DamageCounter, game_over, winner_port
+from bridge.matches import RESPAWN_STATUSES, DamageCounter, game_over, winner_port
 from bridge.protocol import Fighter, Frame, Inputs
 from bridge.statuses import STATUS_NAMES
 
@@ -388,8 +388,8 @@ class RewardTracker:
         ko_opp = p.opponent.stocks > 0 and 0 <= f.opponent.stocks < p.opponent.stocks
         ko_bot = p.bot.stocks > 0 and 0 <= f.bot.stocks < p.bot.stocks
         # DamageCounter: flicker and impossible readings don't pay (see bridge.matches)
-        dealt = self.opp_damage.update(f.opponent.damage, ko_opp)
-        taken = self.bot_damage.update(f.bot.damage, ko_bot)
+        dealt = self.opp_damage.update(f.opponent.damage, ko_opp, f.opponent.status_kind in RESPAWN_STATUSES)
+        taken = self.bot_damage.update(f.bot.damage, ko_bot, f.bot.status_kind in RESPAWN_STATUSES)
         r += c.damage_dealt * dealt - c.damage_taken * taken
         t["damage_dealt"] += dealt
         t["damage_taken"] += taken

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
 from .protocol import Fighter, Frame
+from .statuses import STATUS_NAMES
 from .wire import (
     KIND_CONTROL_STATUS,
     KIND_HEARTBEAT,
@@ -153,6 +154,11 @@ def winner_port(final: Frame) -> int | None:
     return 1 if a.stocks > b.stocks else 2
 
 
+# Statuses between a KO and being back in play. Damage resets during these,
+# and the stock count drops later (sometimes after the respawn), so a
+# fighter's damage peak is forgotten here, not on the stock change.
+RESPAWN_STATUSES = frozenset(k for k, v in STATUS_NAMES.items() if v in ("DEAD", "REBIRTH", "ENTRY", "STANDBY"))
+
 # A single frame can't add more than this much damage (big hits are ~40-60%).
 MAX_DAMAGE_STEP = 80.0
 MAX_DAMAGE = 999.0
@@ -172,10 +178,17 @@ class DamageCounter:
         self.total = 0.0
         self.rejected = 0
 
-    def update(self, damage: float, stock_lost: bool) -> float:
-        """Feed this frame's reading; returns the damage it adds."""
-        if stock_lost:
+    def update(self, damage: float, stock_lost: bool, respawning: bool = False) -> float:
+        """Feed this frame's reading; returns the damage it adds.
+        `respawning`: the fighter is dead or respawning (RESPAWN_STATUSES).
+        Without it, a stock count that drops after the respawn kept the old
+        stock's peak, so the next stock's damage went uncounted until it
+        passed that peak (2026-10-20: normal KOs on the second stock counted
+        as self-destructs)."""
+        if stock_lost or respawning:
             self.peak = None  # new stock: damage starts over
+        if respawning:
+            return 0.0
         if not (0.0 <= damage <= MAX_DAMAGE):
             self.rejected += 1
             return 0.0
@@ -223,7 +236,7 @@ class MatchSummary:
                     self.stocks_lost[i] += old.stocks - new.stocks
                 # Damage resets to 0 on a stock loss; DamageCounter also
                 # ignores flickering and impossible readings.
-                self.damage_taken[i] += self._damage[i].update(new.damage, lost)
+                self.damage_taken[i] += self._damage[i].update(new.damage, lost, new.status_kind in RESPAWN_STATUSES)
         else:
             for i, f in enumerate(fighters(frame)):
                 self._damage[i].update(f.damage, False)

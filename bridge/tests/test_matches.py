@@ -169,6 +169,19 @@ class DamageCounterTests(unittest.TestCase):
         self.assertEqual(c.rejected, 1)
 
 
+    def test_late_stock_drop_does_not_hide_next_stock_damage(self):
+        c = DamageCounter()
+        for d in (0, 50, 120):
+            c.update(d, False)
+        c.update(120, False, respawning=True)   # KO'd: dead
+        c.update(0, False, respawning=True)     # respawn platform, damage reset
+        self.assertEqual(c.update(0, False), 0.0)     # back in play at 0%, stock count not dropped yet
+        self.assertEqual(c.update(10, False), 10.0)
+        self.assertEqual(c.update(10, True), 0.0)     # stock count finally drops
+        self.assertEqual(c.update(25, False), 15.0)
+        self.assertEqual(c.total, 145.0)
+
+
 class VersionGateTests(unittest.TestCase):
     def test_verdicts(self):
         g = VersionGate("13.0.4")

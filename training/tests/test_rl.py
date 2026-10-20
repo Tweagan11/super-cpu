@@ -94,6 +94,23 @@ class RewardTests(unittest.TestCase):
         self.assertAlmostEqual(out[-1], -7.0)
         self.assertEqual(t.totals["self_destructs"], 1)
 
+    def test_second_stock_ko_after_late_stock_drop_is_not_a_self_destruct(self):
+        # first stock reaches 120%, KO, the stock count drops only after the
+        # respawn; then the second stock takes 20% and is KO'd right after
+        t = self.tracker(self_destruct_window=10, offstage_penalty=0)
+        frames = [fr(0), fr(1, bot=fighter(damage=60.0)), fr(2, bot=fighter(damage=120.0))]
+        frames += [fr(i, bot=fighter(damage=120.0, status_kind=181)) for i in range(3, 10)]
+        frames += [fr(i, bot=fighter(damage=0.0)) for i in range(10, 30)]          # respawned, stocks still 3
+        frames += [fr(30, bot=fighter(damage=0.0, stocks=2))]                        # late drop
+        frames += [fr(i, bot=fighter(damage=0.0, stocks=2)) for i in range(31, 50)]
+        frames += [fr(50, bot=fighter(damage=20.0, stocks=2))]                       # hit
+        frames += [fr(i, bot=fighter(damage=20.0, stocks=2, status_kind=181)) for i in range(51, 60)]
+        frames += [fr(60, bot=fighter(damage=0.0, stocks=1, status_kind=181))]
+        [t.step(f) for f in frames]
+        self.assertEqual(t.totals["stocks_lost"], 2)
+        self.assertEqual(t.totals["self_destructs"], 0)
+        self.assertAlmostEqual(t.totals["damage_taken"], 140.0)
+
     def test_offstage_grace_then_penalty(self):
         t = self.tracker(offstage_grace=3, offstage_penalty=0.1)
         off = fighter(pos_x=500.0)
