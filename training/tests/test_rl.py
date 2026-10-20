@@ -32,7 +32,7 @@ def fighter(**kw) -> Fighter:
 
 
 NO_SHAPING = dict(edgeguard_bonus=0.0, spike_bonus=0.0, combo_bonus=0.0, recovery_bonus=0.0,
-                  last_jump_penalty=0.0, stage_control_weight=0.0)
+                  last_jump_penalty=0.0, stage_control_weight=0.0, ledge_return_weight=0.0)
 
 
 def fr(n, bot=None, opp=None, stage=0):
@@ -72,6 +72,25 @@ class RewardTests(unittest.TestCase):
         self.assertAlmostEqual(out[2], -5.0)  # hit one frame ago: just a KO
         t = self.tracker(self_destruct_window=10, offstage_penalty=0)
         out = [t.step(f) for f in [fr(i) for i in range(20)] + [fr(20, bot=fighter(stocks=2))]]
+        self.assertAlmostEqual(out[-1], -7.0)
+        self.assertEqual(t.totals["self_destructs"], 1)
+
+    def test_self_destruct_judged_from_the_death_frame(self):
+        # hit at frame 1, dies (DEAD) on frame 5, stock count only drops on frame 30:
+        # a normal KO, though the stock change is more than the window after the hit
+        t = self.tracker(self_destruct_window=10, offstage_penalty=0)
+        frames = [fr(0), fr(1, bot=fighter(damage=30.0))]
+        frames += [fr(i, bot=fighter(damage=30.0)) for i in range(2, 5)]
+        frames += [fr(i, bot=fighter(damage=30.0, status_kind=181)) for i in range(5, 30)]
+        frames += [fr(30, bot=fighter(stocks=2, status_kind=181))]
+        out = [t.step(f) for f in frames]
+        self.assertAlmostEqual(out[-1], -5.0)
+        self.assertEqual(t.totals["self_destructs"], 0)
+        # same timing with no hit for ages before dying: still a self-destruct
+        t = self.tracker(self_destruct_window=10, offstage_penalty=0)
+        frames = [fr(i) for i in range(20)] + [fr(i, bot=fighter(status_kind=181)) for i in range(20, 40)]
+        frames += [fr(40, bot=fighter(stocks=2, status_kind=181))]
+        out = [t.step(f) for f in frames]
         self.assertAlmostEqual(out[-1], -7.0)
         self.assertEqual(t.totals["self_destructs"], 1)
 
@@ -324,6 +343,28 @@ class ShapingTests(unittest.TestCase):
         t = self.only(dict(stage_control_weight=0.5), gamma=1.0)
         out = run(t, [fr(i, opp=fighter(pos_x=70.0)) for i in range(10)])
         self.assertEqual(out, [0.0] * 10)
+
+    # -- 4b. ledge return ------------------------------------------------------------
+    def test_ledge_return_telescopes_and_skips_hitstun(self):
+        t = self.only(dict(ledge_return_weight=0.01), ledge_return_cap=100.0)
+        # walk out from 90 to 130 and back: nets 0
+        xs = list(range(90, 131, 5)) + list(range(130, 89, -5))
+        run(t, [fr(0), fr(1)] + [fr(2 + i, bot=fighter(pos_x=float(x))) for i, x in enumerate(xs)])
+        self.assertAlmostEqual(t.totals["ledge_return_reward"], 0.0, places=6)
+        # knocked out to 130 in hitstun (not counted), then back to 90: +0.4
+        t = self.only(dict(ledge_return_weight=0.01), ledge_return_cap=100.0)
+        out = [fr(0), fr(1)] + [fr(2 + i, bot=fighter(pos_x=float(x), flags=AIR_HIT)) for i, x in enumerate(range(90, 131, 5))]
+        back = [fr(20 + i, bot=fighter(pos_x=float(x))) for i, x in enumerate(range(130, 89, -5))]
+        run(t, out + back)
+        self.assertAlmostEqual(t.totals["ledge_return_reward"], 0.4, places=5)
+        self.assertGreater(t.totals["ledge_return_frames"], 0)
+
+    def test_ledge_return_not_decayed_and_capped(self):
+        t = self.only(dict(ledge_return_weight=0.01), ledge_return_cap=0.1, mult=0.2)
+        frames = [fr(0), fr(1)] + [fr(2 + i, bot=fighter(pos_x=float(x), flags=AIR_HIT)) for i, x in enumerate(range(90, 131, 5))]
+        frames += [fr(20 + i, bot=fighter(pos_x=float(x))) for i, x in enumerate(range(130, 89, -5))]
+        run(t, frames)
+        self.assertAlmostEqual(t.totals["ledge_return_reward"], 0.1, places=6)
 
     # -- decay and caps -----------------------------------------------------------------
     def test_shaping_multiplier_decays_linearly_to_the_floor(self):

@@ -197,6 +197,13 @@ class RewardConfig:
     recovery_min_frames: int = 30      # offstage frames before getting back pays
     recovery_cooldown: int = 180       # frames between two recovery payouts (ledge-drop loops)
     last_jump_penalty: float = 0.3     # subtracted when jumps_left hits 0 offstage and far from the ledge
+    # 4b. Ledge return: while offstage and not in hitstun, reward per stage unit closer to the nearest
+    # ledge (negative when drifting away). Telescopes within an excursion: walking out and back nets 0,
+    # getting knocked out (hitstun frames don't count) and coming back pays, falling to death costs.
+    # Not decayed: it can't be farmed. Added 2026-10-19: self-destructs were mostly failed recoveries
+    # after being knocked off (sd_report: 71% knocked, 98% died below, 30% never used up-B).
+    ledge_return_weight: float = 0.02
+    ledge_return_cap: float = 4.0
     last_jump_cap: float = 1.0
     last_jump_far: float = 40.0        # distance to the ledge (stage units) that counts as far
     # 5. Stage control, potential-based (Ng et al. 1999): Phi = weight * (closeness(opp) - closeness(bot)).
@@ -235,6 +242,7 @@ SHAPING_TERMS = {
     "recovery": ("recovery_reward", "recoveries"),
     "last_jump": ("last_jump_reward", "last_jumps"),
     "stage_control": ("stage_control_reward", "stage_control_steps"),
+    "ledge_return": ("ledge_return_reward", "ledge_return_frames"),
 }
 SHAPING_COLUMNS = [c for pair in SHAPING_TERMS.values() for c in pair]
 
@@ -295,6 +303,7 @@ class RewardTracker:
         self.armed = False
         self.prev: Frame | None = None
         self.since_damage = 10 ** 9   # frames since the bot last took damage
+        self.since_damage_at_death: int | None = None
         self.offstage_run = 0
         self.opp_damage = DamageCounter()
         self.bot_damage = DamageCounter()
@@ -327,6 +336,13 @@ class RewardTracker:
             return False
         _, cx, gy, lx = _layout_of(sid)
         return abs(ft.pos_x - cx) > lx or ft.pos_y < gy - self.cfg.offstage_below
+
+    @staticmethod
+    def _ledge_dist(ft: Fighter, sid: int) -> float:
+        """Distance to the ledge corner on the fighter's side. Under the stage
+        this points out to the corner, not straight up into the stage."""
+        _, cx, gy, lx = _layout_of(sid)
+        return math.hypot(abs(ft.pos_x - cx) - lx, ft.pos_y - gy)
 
     def _closeness(self, ft: Fighter, sid: int) -> float:
         _, cx, _, lx = _layout_of(sid)
@@ -378,6 +394,11 @@ class RewardTracker:
         t["damage_dealt"] += dealt
         t["damage_taken"] += taken
         self.since_damage = 0 if taken > 0 else self.since_damage + 1
+        # The stock count drops a while after the fighter dies, so judge a
+        # self-destruct from the death frame, not the stock change (counting
+        # from the stock change flagged ~2x as many, including normal KOs).
+        if f.bot.status_kind in _DEAD_STATUSES and p.bot.status_kind not in _DEAD_STATUSES:
+            self.since_damage_at_death = self.since_damage
         if ko_opp:
             n = p.opponent.stocks - f.opponent.stocks
             r += c.stock_taken * n
@@ -386,7 +407,9 @@ class RewardTracker:
             n = p.bot.stocks - f.bot.stocks
             r -= c.stock_lost * n
             t["stocks_lost"] += n
-            if self.since_damage > c.self_destruct_window:
+            since = self.since_damage_at_death if self.since_damage_at_death is not None else self.since_damage
+            self.since_damage_at_death = None
+            if since > c.self_destruct_window:
                 r -= c.self_destruct
                 t["self_destructs"] += 1
         if self.offstage(f):
@@ -454,6 +477,11 @@ class RewardTracker:
         elif bot.status_kind not in _DEAD_STATUSES:
             if self._away(bot, sid):
                 self.bot_exc += 1
+                if c.ledge_return_weight and self._away(p.bot, sid) and not hitstun(bot) and not hitstun(p.bot):
+                    closer = self._ledge_dist(p.bot, sid) - self._ledge_dist(bot, sid)
+                    if closer:
+                        self._count("ledge_return")
+                        r += self._add("ledge_return", c.ledge_return_weight * closer, scaled=False)
                 if p.bot.jumps_left > 0 and bot.jumps_left == 0:
                     _, cx, gy, lx = _layout_of(sid)
                     dist = math.hypot(max(0.0, abs(bot.pos_x - cx) - lx), min(0.0, bot.pos_y - gy))
@@ -1138,6 +1166,17 @@ class RLPolicy:
     def _write_row(self, row: dict) -> None:
         new = not self._csv_path.exists()
         self._csv_path.parent.mkdir(parents=True, exist_ok=True)
+        if not new:
+            # a resumed run whose file has older columns: rewrite it with the
+            # current header (missing columns left blank) so rows line up
+            with open(self._csv_path, newline="") as fh:
+                rd = csv.DictReader(fh)
+                old_cols, old_rows = rd.fieldnames, list(rd)
+            if old_cols != MATCH_COLUMNS:
+                with open(self._csv_path, "w", newline="") as fh:
+                    w = csv.DictWriter(fh, fieldnames=MATCH_COLUMNS, extrasaction="ignore")
+                    w.writeheader()
+                    w.writerows(old_rows)
         with open(self._csv_path, "a", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=MATCH_COLUMNS)
             if new:
