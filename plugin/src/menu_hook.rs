@@ -111,6 +111,13 @@ unsafe fn on_controller_update(ctrl: *mut Controller, a1: u64, a2: u64, a3: u64)
     }
     let mut target = MENU_NPAD.load(Ordering::Relaxed);
     if target == AUTO {
+        // The picked controller went away (battery died, turned off, unpaired):
+        // pick again from what's still connected.
+        if c.style == 0 && c.npad_number == AUTO_NPAD.load(Ordering::Relaxed) {
+            AUTO_NPAD.store(AUTO, Ordering::Relaxed);
+            crate::log::log(format!("menu: npad {} disconnected, picking another connected controller", c.npad_number));
+        }
+        note_no_controller();
         if c.style != 0 && c.npad_number < AUTO_NPAD.load(Ordering::Relaxed) {
             AUTO_NPAD.store(c.npad_number, Ordering::Relaxed);
             crate::log::log(format!(
@@ -134,6 +141,21 @@ unsafe fn on_controller_update(ctrl: *mut Controller, a1: u64, a2: u64, a3: u64)
         c.just_down |= mask;
     }
     ret
+}
+
+/// Auto mode: say so (once per stretch) when a press is waiting and no
+/// connected controller has been seen. Menus only read connected controllers,
+/// so with none the presses go nowhere (hardware 2026-10-21: the controller
+/// had disconnected and auto rematch stopped with no npad line in the log).
+fn note_no_controller() {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if AUTO_NPAD.load(Ordering::Relaxed) != AUTO {
+        WARNED.store(false, Ordering::Relaxed);
+        return;
+    }
+    if menu::pending() && !WARNED.swap(true, Ordering::Relaxed) {
+        crate::log::log("menu: no connected controller found, so menu presses can't reach the game. Connect one (a wired controller is safest) or set menu_npad");
+    }
 }
 
 /// Logs, once per scene, whether a waiting press was held back (and why) or
