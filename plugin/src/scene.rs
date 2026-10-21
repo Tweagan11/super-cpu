@@ -25,7 +25,9 @@ pub const FLAG_MENU_HOOK: u32 = 2;
 /// match, so menu presses are never applied there. Best guess from HDR's
 /// `load_melee_scene`; E1 settles it. A name that also says "result" is the
 /// results screen, where presses are exactly what we want.
-const MATCH_SCENE_HINTS: &[&str] = &["melee"];
+/// "meleescene", not "melee": MeleeRuleScene (the rules menu) would count too
+/// and block presses there (hardware 2026-10-21).
+const MATCH_SCENE_HINTS: &[&str] = &["meleescene"];
 const NOT_MATCH_HINTS: &[&str] = &["result"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +127,7 @@ mod tests {
         assert!(!is_match_scene("CharaSelectScene"));
         assert!(!is_match_scene(""));
         assert!(!is_match_scene("MeleeResultScene"));
+        assert!(!is_match_scene("MeleeRuleScene"));
     }
 
     #[test]

@@ -30,7 +30,8 @@ class SceneNames:
     # (results) -> StageSelectScene -> CharaSelectScene -> MeleeScene.
     css: tuple[str, ...] = ("CharaSelect",)
     results: tuple[str, ...] = ("Result", "UnlockSequence")
-    match: tuple[str, ...] = ("Melee",)
+    # "MeleeScene", not "Melee": MeleeRuleScene (the rules menu) also says Melee (hardware 2026-10-21)
+    match: tuple[str, ...] = ("MeleeScene",)
     stage: tuple[str, ...] = ("StageSelect",)
 
     def classify(self, name: str) -> str:

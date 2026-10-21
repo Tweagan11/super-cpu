@@ -97,6 +97,7 @@ class SceneNameTests(unittest.TestCase):
         self.assertEqual(n.classify("CharaSelectScene"), CSS)
         self.assertEqual(n.classify("MeleeScene"), MATCH)
         self.assertEqual(n.classify("MeleeResultScene"), RESULTS)
+        self.assertEqual(n.classify("MeleeRuleScene"), OTHER)
         self.assertEqual(n.classify("TitleScene"), OTHER)
         self.assertEqual(SceneNames(css=("Foo",)).classify("xfoo"), CSS)
 
