@@ -33,6 +33,7 @@ Only one program can own UDP 4243 at a time, so stop udp_listen first.
 from __future__ import annotations
 
 import argparse
+import re
 import socket
 import statistics
 import time
@@ -515,7 +516,8 @@ def main(argv: list[str] | None = None) -> int:
 
         controllers = ["", ""]
         controllers[args.bot_port - 1] = f"bot:{model}"
-        controllers[2 - args.bot_port] = "cpu:9" if args.opponent == "cpu9" else args.opponent
+        m = re.fullmatch(r"cpu(\d)", args.opponent)
+        controllers[2 - args.bot_port] = f"cpu:{m.group(1)}" if m else args.opponent
         if args.controllers:
             controllers = [c.strip() for c in args.controllers.split(",")]
             if len(controllers) != 2:
@@ -525,7 +527,10 @@ def main(argv: list[str] | None = None) -> int:
             stage=args.stage, controllers=tuple(controllers),
             ruleset={**DEFAULT_RULESET, "stocks": args.stocks},
         )
-    run(args.port, POLICIES[args.policy](), args.delay, args.bot_port, args.expect_version,
+    policy = POLICIES[args.policy]()
+    if hasattr(policy, "set_opponent"):
+        policy.set_opponent(args.opponent)   # RL logs who it played (curriculum, SSB-30)
+    run(args.port, policy, args.delay, args.bot_port, args.expect_version,
         args.report_every, args.seconds, logger=logger, session=session, idle_timeout=args.idle_timeout,
         auto_rematch=args.auto_rematch, scene_names=names)
     return 0 if session is None or session.done else 1

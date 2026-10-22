@@ -321,6 +321,22 @@ bot found a loop (below). To switch a term off set its weight to 0
   Standing at center and not fighting shows as a rising `stage_control_reward`
   with low `damage_dealt`; lower the weight.
 
+## Curriculum (SSB-30)
+
+RL learns fastest against an opponent it beats some of the time. Game
+settings, nothing to build:
+
+- One opponent character on the CPU card (not Random), Final Destination.
+- Start at CPU level 7 and pass the level to the bridge: `--opponent cpu7`.
+- Step up one level when the log says so: past 50% wins over the last 40
+  matches against that opponent, `[rl] curriculum: ... Time to raise the CPU
+  level` is printed once. Change the level on the CPU card and restart with
+  the new `--opponent` (keep `SCPU_RL_RESUME`).
+- Add a second opponent character only after reaching level 9 with the first.
+
+Every 20 matches the log prints the wins in the last 40 per (opponent,
+fighter). `matches.csv` has `opponent` and `opp_fighter` columns.
+
 ## Tests
 
 From the repo root:

@@ -121,6 +121,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from bridge.kinds import kind_name
 from bridge.matches import RESPAWN_STATUSES, DamageCounter, game_over, winner_port
 from bridge.protocol import Fighter, Frame, Inputs
 from bridge.statuses import STATUS_NAMES
@@ -902,7 +903,14 @@ class Learner:
 MATCH_COLUMNS = ["match", "time", "version", "updates_done", "frames", "hold", "decisions", "return", "result", "win",
                  "bot_stocks", "opp_stocks", "damage_dealt", "damage_taken", "stocks_taken", "stocks_lost",
                  "self_destructs", "offstage_frames", "shaping_mult", *SHAPING_COLUMNS, "shaping_total", "mean_entropy", "mean_value", "act_ms_mean",
-                 "rolling_win", "kept", "last_kl_ref", "last_update_entropy", "last_policy_loss", "last_value_loss"]
+                 "rolling_win", "kept", "last_kl_ref", "last_update_entropy", "last_policy_loss", "last_value_loss",
+                 "opponent", "opp_fighter"]
+
+# Curriculum (SSB-30): matches per opponent in the rolling win rate, and the
+# win rate past which the log suggests raising the CPU level.
+CURRICULUM_WINDOW = 40
+CURRICULUM_STEP_UP = 0.5
+CURRICULUM_REPORT_EVERY = 20
 
 
 class RLPolicy:
@@ -990,6 +998,10 @@ class RLPolicy:
             self.delay = delay
         if bot_port is not None:
             self.fcfg = dataclasses.replace(self.fcfg, bot_port=bot_port)
+
+    def set_opponent(self, label: str) -> None:
+        """bridge.run's --opponent (e.g. cpu7), logged per match."""
+        self.opponent = label
 
     def on_match_start(self, ev) -> None:
         self._begin()
@@ -1122,9 +1134,11 @@ class RLPolicy:
         if done:
             self._rr[-1] += self.tracker.finish()   # terminal potential: Phi(end) = 0
         t = self.tracker.totals
+        opp_fighter = kind_name(final.opponent.fighter_kind) if final is not None else ""
         if kept:
             self.matches += 1
             self.results.append(win)
+            self._curriculum(opp_fighter, win)
         rolling = float(np.mean(self.results)) if self.results else float("nan")
         shaped = decision_rewards(self._frames, self._rf, self._rr, self.delay, self.rcfg.effect_lag, cfg.hold)
         ls = self.learner.last_stats if self.learner is not None else {}
@@ -1141,6 +1155,7 @@ class RLPolicy:
             "rolling_win": rolling, "kept": int(kept),
             "last_kl_ref": ls.get("kl_ref", ""), "last_update_entropy": ls.get("entropy", ""),
             "last_policy_loss": ls.get("policy_loss", ""), "last_value_loss": ls.get("value_loss", ""),
+            "opponent": getattr(self, "opponent", ""), "opp_fighter": opp_fighter,
         }
         self.stats.append(row)
         if self.learner is not None:
@@ -1162,6 +1177,24 @@ class RLPolicy:
             self.log(f"[rl] new best rolling win rate {rolling:.2f}")
         if self.matches % cfg.ckpt_every == 0:
             self.learner.submit("ckpt", {"which": "last"})
+
+    def _curriculum(self, opp_fighter: str, win: float) -> None:
+        """Rolling win rate per (opponent label, fighter); a summary every
+        CURRICULUM_REPORT_EVERY matches and a step-up suggestion, once per
+        key, past CURRICULUM_STEP_UP over a full window."""
+        if not hasattr(self, "_by_opp"):
+            self._by_opp: dict[tuple[str, str], deque] = {}
+            self._suggested: set[tuple[str, str]] = set()
+        key = (getattr(self, "opponent", "") or "?", opp_fighter or "?")
+        q = self._by_opp.setdefault(key, deque(maxlen=CURRICULUM_WINDOW))
+        q.append(win)
+        if self.matches % CURRICULUM_REPORT_EVERY == 0:
+            parts = [f"{o} {f}: {sum(v):.0f}/{len(v)}" for (o, f), v in sorted(self._by_opp.items())]
+            self.log("[rl] curriculum, wins in the last " + str(CURRICULUM_WINDOW) + " per opponent: " + ", ".join(parts))
+        if len(q) == CURRICULUM_WINDOW and float(np.mean(q)) >= CURRICULUM_STEP_UP and key not in self._suggested:
+            self._suggested.add(key)
+            self.log(f"[rl] curriculum: {sum(q):.0f}/{len(q)} wins vs {key[0]} {key[1]}. "
+                     "Time to raise the CPU level (and update --opponent).")
 
     def _write_row(self, row: dict) -> None:
         new = not self._csv_path.exists()
