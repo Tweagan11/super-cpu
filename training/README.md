@@ -332,7 +332,8 @@ settings, nothing to build:
   matches against that opponent, `[rl] curriculum: ... Time to raise the CPU
   level` is printed once. Change the level on the CPU card and restart with
   the new `--opponent` (keep `SCPU_RL_RESUME`).
-- Add a second opponent character only after reaching level 9 with the first.
+- Add a second opponent character only after reaching level 9 with the first,
+  or train against Random from the start: the prompt also tracks all fighters together.
 
 Every 20 matches the log prints the wins in the last 40 per (opponent,
 fighter). `matches.csv` has `opponent` and `opp_fighter` columns.

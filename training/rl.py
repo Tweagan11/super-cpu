@@ -1185,16 +1185,24 @@ class RLPolicy:
         if not hasattr(self, "_by_opp"):
             self._by_opp: dict[tuple[str, str], deque] = {}
             self._suggested: set[tuple[str, str]] = set()
-        key = (getattr(self, "opponent", "") or "?", opp_fighter or "?")
-        q = self._by_opp.setdefault(key, deque(maxlen=CURRICULUM_WINDOW))
-        q.append(win)
+        label = getattr(self, "opponent", "") or "?"
+        # per fighter, plus one key for the label across all fighters, so a
+        # Random CPU card (a different fighter every match) still gets a prompt
+        keys = [(label, opp_fighter or "?"), (label, "all fighters")]
+        for key in keys:
+            self._by_opp.setdefault(key, deque(maxlen=CURRICULUM_WINDOW)).append(win)
         if self.matches % CURRICULUM_REPORT_EVERY == 0:
-            parts = [f"{o} {f}: {sum(v):.0f}/{len(v)}" for (o, f), v in sorted(self._by_opp.items())]
-            self.log("[rl] curriculum, wins in the last " + str(CURRICULUM_WINDOW) + " per opponent: " + ", ".join(parts))
-        if len(q) == CURRICULUM_WINDOW and float(np.mean(q)) >= CURRICULUM_STEP_UP and key not in self._suggested:
-            self._suggested.add(key)
-            self.log(f"[rl] curriculum: {sum(q):.0f}/{len(q)} wins vs {key[0]} {key[1]}. "
-                     "Time to raise the CPU level (and update --opponent).")
+            overall = [(k, v) for k, v in self._by_opp.items() if k[1] == "all fighters"]
+            fighters = sorted(((k, v) for k, v in self._by_opp.items() if k[1] != "all fighters" and len(v) >= 10),
+                              key=lambda kv: -len(kv[1]))[:6]
+            parts = [f"{o} {f}: {sum(v):.0f}/{len(v)}" for (o, f), v in overall + fighters]
+            self.log("[rl] curriculum, wins in the last " + str(CURRICULUM_WINDOW) + ": " + ", ".join(parts))
+        for key in keys:
+            q = self._by_opp[key]
+            if len(q) == CURRICULUM_WINDOW and float(np.mean(q)) >= CURRICULUM_STEP_UP and key not in self._suggested:
+                self._suggested.add(key)
+                self.log(f"[rl] curriculum: {sum(q):.0f}/{len(q)} wins vs {key[0]} ({key[1]}). "
+                         "Time to raise the CPU level (and update --opponent).")
 
     def _write_row(self, row: dict) -> None:
         new = not self._csv_path.exists()
