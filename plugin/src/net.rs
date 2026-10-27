@@ -157,7 +157,7 @@ fn spawn_receiver(s: Arc<UdpSocket>, pc_ip: Option<IpAddr>) -> bool {
     let gen = SOCKET_GEN.load(Ordering::Relaxed);
     let spawned = std::thread::Builder::new().name("super-cpu-rx".into()).spawn(move || {
         let mut rx = InputReceiver::new();
-        let mut buf = [0u8; 64];
+        let mut buf = [0u8; 128];
         let mut first = true;
         // The Switch reports some receive problems as a bare "os error 1".
         // Nothing here is fatal: log it (first time, then at 2, 4, 8, ...),
@@ -179,6 +179,10 @@ fn spawn_receiver(s: Arc<UdpSocket>, pc_ip: Option<IpAddr>) -> bool {
                     if pc_ip.map_or(true, |ip| ip == from.ip()) {
                         if n >= 8 && u16::from_le_bytes([buf[6], buf[7]]) == crate::menu::KIND_MENU {
                             crate::menu::handle_packet(&buf[..n]);
+                            continue;
+                        }
+                        if n >= 8 && u16::from_le_bytes([buf[6], buf[7]]) == crate::drill::KIND_RESET {
+                            crate::drill::handle_packet(&buf[..n]);
                             continue;
                         }
                         rx.handle(&input::SHARED, &buf[..n], input::now_ms(), LIVE_FRAME.load(Ordering::Relaxed));
@@ -273,6 +277,7 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
         let mut next_log_resend = Instant::now();
         let mut next_scene = Instant::now();
         let mut scene_sent = u32::MAX;
+        let mut drill_done_sent = crate::drill::DONE_COUNT.load(Ordering::Acquire);
         let mut logs_sent = 0u32;
         // Send timing, reported every SEND_REPORT_EVERY when any send was slow:
         // tells whether sends ever wait on the blocked receive.
@@ -329,6 +334,21 @@ pub fn run(cfg: Config, frames: Receiver<FrameState>, acks: Receiver<Ack>, healt
                     crate::menu_hook::flags(),
                     crate::menu::APPLIED.load(Ordering::Relaxed),
                     crate::menu::APPLIED_SEQ.load(Ordering::Relaxed),
+                );
+                if !send(&sock, &pkt, &target) {
+                    break;
+                }
+                seq = seq.wrapping_add(1);
+            }
+            // Drill reset finished (kind 10): sent once per completion.
+            let done = crate::drill::DONE_COUNT.load(Ordering::Acquire);
+            if done != drill_done_sent {
+                drill_done_sent = done;
+                let pkt = crate::drill::done_packet(
+                    seq,
+                    crate::drill::DONE_SEQ.load(Ordering::Relaxed),
+                    crate::drill::DONE_MASK.load(Ordering::Relaxed),
+                    crate::drill::DONE_FLAGS.load(Ordering::Relaxed),
                 );
                 if !send(&sock, &pkt, &target) {
                     break;

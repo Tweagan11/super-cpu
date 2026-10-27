@@ -65,6 +65,8 @@ from .wire import (
     FLAG_SESSION_ACTIVE,
     KIND_INPUT,
     KIND_MENU,
+    KIND_RESET,
+    RESET_FLAG_TRAINING,
     SCENE_FLAG_MENU_HOOK,
     SCENE_FLAG_SCENE_HOOK,
     BadPacket,
@@ -79,6 +81,8 @@ from .wire import (
     unpack_header,
     unpack_input,
     unpack_menu,
+    unpack_reset,
+    pack_reset_done,
 )
 
 ROBOT = 0x2D
@@ -376,6 +380,13 @@ def run(host: str, port: int, drop: float, version: str, match: bool, seconds: f
                 if kind == KIND_MENU:
                     m = unpack_menu(buf)
                     on_menu(m.mask, m.press_seq, now)
+                    continue
+                if kind == KIND_RESET:
+                    # Drill reset: report it placed (the scripted frames don't move;
+                    # the drill runner's tests use their own fake).
+                    r = unpack_reset(buf)
+                    mask = sum(1 << i for i, p in enumerate(r.ports) if p is not None)
+                    send(pack_reset_done(seq, r.reset_seq, mask, RESET_FLAG_TRAINING))
                     continue
                 if kind != KIND_INPUT:
                     continue

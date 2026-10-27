@@ -166,6 +166,9 @@ pub fn on_fighter_frame(acc: &mut BattleObjectModuleAccessor) {
         if utility::get_kind(acc) == *FIGHTER_KIND_NANA {
             return;
         }
+        // SSB-32: a drill reset waiting for this port is applied before the
+        // state is read, so this frame already shows the new spot.
+        crate::drill_apply::on_fighter(acc, entry);
         let fighter = read_fighter(acc, entry);
         let cm = read_control_inputs(acc);
         // The results screen keeps fighters alive in DEMO (victory/clap

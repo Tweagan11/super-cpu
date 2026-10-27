@@ -61,12 +61,17 @@ pub struct Config {
     pub force_costume: u8,
     /// Install the record copy hook as well as the decided-fighter hook.
     pub force_copy_hook: bool,
+    /// Apply drill resets (kind 9) from the PC (SSB-32, docs/drills.md).
+    pub drills: bool,
+    /// Allow drill resets outside training mode too.
+    pub drills_in_versus: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self { pc_ip: "192.168.1.50".into(), udp_port: 4243, bot_port: 2, fim_player_idx: None, cpu_probe: true, auto_menu: false, drive_cpu: false, cpu_controller_index: None, menu_npad: None,
-            force_fighter: false, force_ports: vec![2], force_costume: 5, force_copy_hook: true }
+            force_fighter: false, force_ports: vec![2], force_costume: 5, force_copy_hook: true,
+            drills: false, drills_in_versus: false }
     }
 }
 
@@ -84,7 +89,9 @@ pub fn template(cfg: &Config) -> String {
          # force green R.O.B. on these ports without touching the CSS (game 13.0.4 only)\n\
          # force_fighter = true\n\
          # force_ports = [2]\n\
-         # force_costume = 5\n",
+         # force_costume = 5\n\
+         # drill resets from the PC (training mode; docs/drills.md)\n\
+         # drills = true\n",
         cfg.pc_ip, cfg.udp_port, cfg.bot_port
     )
 }
@@ -148,6 +155,8 @@ fn parse_into(text: &str, cfg: &mut Config) {
             }
             "force_fighter" => cfg.force_fighter = matches!(value, "1" | "true" | "on"),
             "force_copy_hook" => cfg.force_copy_hook = !matches!(value, "0" | "false" | "off"),
+            "drills" => cfg.drills = matches!(value, "1" | "true" | "on"),
+            "drills_in_versus" => cfg.drills_in_versus = matches!(value, "1" | "true" | "on"),
             "force_ports" => {
                 let ports = parse_ports(value);
                 if ports.is_empty() {
@@ -237,7 +246,8 @@ mod tests {
     fn template_parses_back() {
         let d = Config::default();
         let mut c = Config { pc_ip: String::new(), udp_port: 0, bot_port: 1, fim_player_idx: None, cpu_probe: false, auto_menu: false, drive_cpu: true, cpu_controller_index: Some(9), menu_npad: Some(3),
-            force_fighter: false, force_ports: vec![], force_costume: 0, force_copy_hook: false };
+            force_fighter: false, force_ports: vec![], force_costume: 0, force_copy_hook: false,
+            drills: false, drills_in_versus: false };
         parse_into(&template(&d), &mut c);
         assert_eq!((c.pc_ip, c.udp_port, c.bot_port), (d.pc_ip, d.udp_port, d.bot_port));
     }

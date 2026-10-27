@@ -84,6 +84,30 @@ class FrameTrackerTests(unittest.TestCase):
         self.assertTrue(t.see(0))
 
 
+class ResetPacketTests(unittest.TestCase):
+    def test_round_trip_and_golden_layout(self):
+        from bridge.wire import (PortReset, RESET_LEN, pack_reset, pack_reset_done, unpack_reset,
+                                 unpack_reset_done)
+        p2 = PortReset(120.0, -30.0, air=True, facing=-1, jumps_left=1, damage=60.0)
+        b = pack_reset(5, 9, None, p2)
+        self.assertEqual(len(b), RESET_LEN)
+        r = unpack_reset(b)
+        self.assertEqual((r.reset_seq, r.ports), (9, (None, p2)))
+        # port 2 block: apply, air, facing -1, 1 jump, then x as f32
+        self.assertEqual(b[40:44], bytes([1, 1, 0xFF, 1]))
+        self.assertEqual(b[16:40], bytes(24))
+        # the plugin's done packet (plugin/src/drill.rs test output)
+        d = unpack_reset_done(bytes.fromhex("5343505504000a0003000000090000000200000001000000"))
+        self.assertEqual((d.reset_seq, d.placed_mask, d.training, d.refused), (9, 2, True, False))
+        self.assertEqual(pack_reset_done(3, 9, 2, 1), bytes.fromhex("5343505504000a0003000000090000000200000001000000"))
+
+    def test_reset_tool_specs(self):
+        from bridge.reset import parse_spec
+        r = parse_spec("120,-30,ground,dmg=60,jumps=0,face=left")
+        self.assertEqual((r.x, r.y, r.air, r.damage, r.jumps_left, r.facing), (120.0, -30.0, False, 60.0, 0, -1))
+        self.assertEqual(parse_spec("-40,0").damage, -1.0)
+
+
 class SeqTrackerTests(unittest.TestCase):
     def test_counts_gaps(self):
         t = SeqTracker()

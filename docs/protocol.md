@@ -255,6 +255,34 @@ Asks the plugin to press controller buttons that menus read (not the mapped inpu
 
 The plugin pulses the press: the button is down on the first frame, then up for two, again and again until `hold frames` have passed. So 1 is a single press, 4 is two. Held buttons often don't register as a fresh press in menus, which is why. A running press is dropped when a match scene starts.
 
+## Drill reset (kind 9, PC to plugin) - built, not yet on hardware (SSB-32)
+
+64 bytes: header, reset seq (u32), then one 24-byte block per port (port 1
+first):
+
+| offset in block | type | field |
+| --- | --- | --- |
+| 0 | u8 | apply (bit 0); a port without it is left alone |
+| 1 | u8 | start: 0 ground (status WAIT), 1 air (status FALL) |
+| 2 | i8 | facing: -1 left, 1 right, 0 keep |
+| 3 | i8 | jumps left after the reset; negative keeps |
+| 4 | f32 | x |
+| 8 | f32 | y |
+| 12 | f32 | damage (percent); negative keeps |
+| 16 | f32 | vx (launch speed, not applied yet) |
+| 20 | f32 | vy (launch speed, not applied yet) |
+
+Applied in each port's next fighter update (a fighter that is dead or
+respawning is placed once it's back), before that frame's state is read.
+Only with `drills = true` in config.toml, and only in training mode unless
+`drills_in_versus = true`. A newer reset replaces one still in progress.
+
+## Reset done (kind 10, plugin to PC) - built (SSB-32)
+
+24 bytes: header, reset seq (u32), placed ports mask (u32, bit 0 = port 1),
+flags (u32): bit 0 the game is in training mode, bit 1 refused (nothing
+placed; the plugin logs why). Sent once per reset.
+
 ## Golden bytes
 
 `plugin/src/input.rs` and `bridge/tests/test_inputs.py` both check the same hex strings for an input, an ack and a control status packet, and `plugin/src/net.rs` (`state_v4_golden`) and `bridge/tests/test_capture.py` check the v4 state packet with captured and control module inputs, so a layout change on one side fails the other side's tests.

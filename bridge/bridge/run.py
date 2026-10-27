@@ -53,19 +53,24 @@ from .wire import (
     KIND_CONTROL_STATUS,
     KIND_HEARTBEAT,
     KIND_LOG,
+    KIND_RESET_DONE,
     KIND_SCENE,
     KIND_STATE,
     Ack,
+    PortReset,
+    ResetDone,
     BadPacket,
     ControlStatus,
     LogDedup,
     bits_list,
     pack_input,
     pack_menu,
+    pack_reset,
     unpack_ack,
     unpack_control_status,
     unpack_header,
     unpack_heartbeat,
+    unpack_reset_done,
 )
 
 # The plugin keeps 32 frames of pending input; anything further ahead is refused.
@@ -231,6 +236,9 @@ class Bridge:
         self._warned_port = False
         self._warned_hook = False
         self.on_ack: Callable[[Ack], None] | None = None
+        # Drill resets (SSB-32): who hears about kind 10 (the drill runner).
+        self.on_reset_done: Callable[[ResetDone], None] | None = None
+        self.reset_seq = 0
 
     @property
     def port(self) -> int:
@@ -294,6 +302,12 @@ class Bridge:
                 _, line = self.watcher.packet(buf, time.monotonic())
                 if self.logs.new(line):
                     self.log(f"[switch] {line.text}")
+            elif header.kind == KIND_RESET_DONE:
+                d = unpack_reset_done(buf)
+                if self.on_reset_done:
+                    self.on_reset_done(d)
+                else:
+                    self.log(f"[run] reset #{d.reset_seq} " + ("refused" if d.refused else f"placed (ports mask {d.placed_mask:#b})"))
             elif header.kind == KIND_SCENE:
                 _, sc = self.watcher.packet(buf, time.monotonic())
                 self._on_scene(sc)
@@ -343,6 +357,16 @@ class Bridge:
         self.sock.sendto(packet, self.switch)
         self.out_seq = (self.out_seq + 1) & 0xFFFFFFFF
         self.menu_seq = (self.menu_seq + 1) & 0xFFFFFFFF
+
+    def send_reset(self, p1: PortReset | None, p2: PortReset | None) -> int | None:
+        """Ask the plugin to place fighters (kind 9). Returns the reset seq the
+        reset-done packet will carry, or None before the Switch is known."""
+        if self.switch is None:
+            return None
+        self.reset_seq = (self.reset_seq + 1) & 0xFFFFFFFF
+        self.sock.sendto(pack_reset(self.out_seq, self.reset_seq, p1, p2), self.switch)
+        self.out_seq = (self.out_seq + 1) & 0xFFFFFFFF
+        return self.reset_seq
 
     def _on_scene(self, sc) -> None:
         if sc.name != self.scene_name:

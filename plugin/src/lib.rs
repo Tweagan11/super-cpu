@@ -30,6 +30,8 @@
 mod config;
 mod control;
 mod cpu_drive;
+mod drill;
+mod drill_apply;
 mod force;
 mod force_hook;
 mod frame;
@@ -76,6 +78,7 @@ pub fn main() {
     control::install(cfg.cpu_probe, cfg.drive_cpu, cfg.cpu_controller_index);
     menu_hook::install(cfg.menu_npad, cfg.auto_menu);
     force_hook::install(cfg.force_fighter, &cfg.force_ports, cfg.force_costume, cfg.force_copy_hook);
+    drill_apply::install(cfg.drills, cfg.drills_in_versus);
 
     // Networking never runs on the game thread.
     std::thread::spawn(move || net::run(cfg, rx, ack_rx, health));

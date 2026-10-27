@@ -23,6 +23,8 @@ KIND_CONTROL_STATUS = 5
 KIND_LOG = 6  # plugin log line (plugin/src/log.rs)
 KIND_SCENE = 7  # current scene name (plugin/src/scene.rs)
 KIND_MENU = 8  # PC to Switch: press menu buttons (plugin/src/menu.rs)
+KIND_RESET = 9  # PC to Switch: place fighters for a drill (plugin/src/drill.rs)
+KIND_RESET_DONE = 10  # Switch to PC: a reset is in place (or was refused)
 
 HEADER_FMT = "<4sHHI"  # magic, proto_version, kind, seq
 HEADER_LEN = struct.calcsize(HEADER_FMT)  # 12
@@ -376,3 +378,89 @@ def unpack_menu(buf: bytes) -> MenuPress:
         raise BadPacket("not a menu press packet")
     press_seq, mask, hold, _ = struct.unpack_from(MENU_FMT, buf, HEADER_LEN)
     return MenuPress(h, press_seq, mask, hold)
+
+
+# --- Drill reset (kind 9, PC to Switch) and reset done (kind 10) -------------
+# Body: reset seq (u32), then one 24-byte block per port:
+# apply (u8, bit 0), start (u8: 0 ground, 1 air), facing (i8: -1 left, 1 right,
+# 0 keep), jumps left (i8, negative keeps), x, y, damage (negative keeps),
+# vx, vy (f32; launch speed, not applied yet).
+RESET_PORT_FMT = "<BBbbfffff"
+RESET_PORT_LEN = struct.calcsize(RESET_PORT_FMT)  # 24
+RESET_LEN = HEADER_LEN + 4 + 2 * RESET_PORT_LEN  # 64
+START_GROUND = 0
+START_AIR = 1
+RESET_DONE_FMT = "<III"  # reset seq, placed ports mask (bit 0 = P1), flags
+RESET_DONE_LEN = HEADER_LEN + struct.calcsize(RESET_DONE_FMT)  # 24
+RESET_FLAG_TRAINING = 1  # the game was in training mode
+RESET_FLAG_REFUSED = 2  # drills off, or not training mode without drills_in_versus
+
+
+@dataclass(frozen=True)
+class PortReset:
+    x: float
+    y: float
+    air: bool = True
+    facing: int = 0  # -1 left, 1 right, 0 keep
+    jumps_left: int = -1  # negative: keep
+    damage: float = -1.0  # negative: keep
+    vx: float = 0.0
+    vy: float = 0.0
+
+
+@dataclass(frozen=True)
+class Reset:
+    header: Header
+    reset_seq: int
+    ports: tuple[PortReset | None, PortReset | None]
+
+
+@dataclass(frozen=True)
+class ResetDone:
+    header: Header
+    reset_seq: int
+    placed_mask: int
+    flags: int
+
+    @property
+    def refused(self) -> bool:
+        return bool(self.flags & RESET_FLAG_REFUSED)
+
+    @property
+    def training(self) -> bool:
+        return bool(self.flags & RESET_FLAG_TRAINING)
+
+
+def pack_reset(seq: int, reset_seq: int, p1: PortReset | None, p2: PortReset | None) -> bytes:
+    out = pack_header(KIND_RESET, seq) + struct.pack("<I", reset_seq & 0xFFFFFFFF)
+    for r in (p1, p2):
+        if r is None:
+            out += bytes(RESET_PORT_LEN)
+        else:
+            out += struct.pack(RESET_PORT_FMT, 1, START_AIR if r.air else START_GROUND, max(-1, min(1, r.facing)),
+                               max(-1, min(127, r.jumps_left)), r.x, r.y, r.damage, r.vx, r.vy)
+    return out
+
+
+def unpack_reset(buf: bytes) -> Reset:
+    h = unpack_header(buf)
+    if h.kind != KIND_RESET or len(buf) < RESET_LEN:
+        raise BadPacket("not a reset packet")
+    (reset_seq,) = struct.unpack_from("<I", buf, HEADER_LEN)
+    ports = []
+    for p in range(2):
+        apply, start, facing, jumps, x, y, dmg, vx, vy = struct.unpack_from(
+            RESET_PORT_FMT, buf, HEADER_LEN + 4 + p * RESET_PORT_LEN)
+        ports.append(PortReset(x, y, start == START_AIR, facing, jumps, dmg, vx, vy) if apply & 1 else None)
+    return Reset(h, reset_seq, (ports[0], ports[1]))
+
+
+def pack_reset_done(seq: int, reset_seq: int, placed_mask: int, flags: int) -> bytes:
+    return pack_header(KIND_RESET_DONE, seq) + struct.pack(RESET_DONE_FMT, reset_seq & 0xFFFFFFFF, placed_mask, flags)
+
+
+def unpack_reset_done(buf: bytes) -> ResetDone:
+    h = unpack_header(buf)
+    if h.kind != KIND_RESET_DONE or len(buf) < RESET_DONE_LEN:
+        raise BadPacket("not a reset done packet")
+    return ResetDone(h, *struct.unpack_from(RESET_DONE_FMT, buf, HEADER_LEN))
